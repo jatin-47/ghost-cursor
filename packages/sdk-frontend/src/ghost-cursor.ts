@@ -123,11 +123,13 @@ export function createGhostCursor(config: GhostCursorConfig): GhostCursorInstanc
       case 'awaiting_actions': {
         const actions = response.actions || [];
         // Check if any action is a guided tour
-        const tourAction = actions.find(a => a.tool === 'guided_tour');
-        if (tourAction) {
+        const tourIndex = actions.findIndex(a => a.tool === 'guided_tour');
+        if (tourIndex !== -1) {
+          const tourAction = actions[tourIndex];
+          const priorActions = actions.slice(0, tourIndex);
           // Auto-approve tours
-          widget.addAssistantMessage(response.reply || "Let me show you!");
-          executeTour(tourAction);
+          widget.addAssistantMessage(response.reply || "Let me show you! Follow this guided tour.");
+          executeTour(tourAction, priorActions);
         } else if (requireApproval && actions.length > 0) {
           pendingActions = actions;
           widget.showActionPlan(actions, response.reply || undefined);
@@ -279,10 +281,32 @@ export function createGhostCursor(config: GhostCursorConfig): GhostCursorInstanc
     widget.setInputDisabled(false);
   }
 
-  async function executeTour(tourAction: ActionItem): Promise<void> {
+  async function executeTour(tourAction: ActionItem, priorActions: ActionItem[] = []): Promise<void> {
     const rawSteps = tourAction.parameters?.steps;
     const steps = Array.isArray(rawSteps) ? (rawSteps as any) : [];
     if (steps.length === 0) return;
+
+    // Execute any prior navigation actions
+    for (const act of priorActions) {
+      if (act.tool === 'navigate') {
+        const targetPage = String(act.parameters?.target_page || act.parameters?.url || '');
+        if (targetPage) {
+          const clean = targetPage.startsWith('/') ? targetPage : `/${targetPage}`;
+          const navName = clean.replace('/', '');
+          const navLink = (document.querySelector(`[data-ghost-nav="${CSS.escape(clean)}"]`) ||
+            document.querySelector(`[data-ghost-nav="${CSS.escape(navName)}"]`) ||
+            document.querySelector(`[data-ghost-id="nav.${CSS.escape(navName)}"]`)) as HTMLElement | null;
+
+          if (navLink) {
+            navLink.click();
+          } else {
+            window.history.pushState({}, '', clean);
+            window.dispatchEvent(new PopStateEvent('popstate'));
+          }
+          await new Promise(r => setTimeout(r, 450));
+        }
+      }
+    }
 
     // Close the chat interface so the guided tour highlights are not covered
     widget.close();
@@ -290,7 +314,7 @@ export function createGhostCursor(config: GhostCursorConfig): GhostCursorInstanc
     tourEngine.startTour(steps, () => {
       // Reopen the chat interface once the tour completes
       widget.open();
-      widget.addSystemMessage('Tour complete!');
+      widget.addSystemMessage('Guided tour completed!');
       widget.setInputDisabled(false);
 
       // Continue the run

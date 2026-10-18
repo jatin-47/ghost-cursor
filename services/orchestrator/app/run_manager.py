@@ -230,12 +230,12 @@ class RunManager:
                 run.plan = {"reply": "I encountered an error. Please try again.", "actions": [], "questions": [], "toolCalls": []}
 
         # Handle action/tool results
-        if req.kind in ("actions", "tools"):
+        if req.kind in ("actions", "tools", "action_results"):
             results = [r.model_dump() for r in (req.results or [])]
 
             # Validate result IDs match pending operations
             pending_ids = set()
-            if req.kind == "actions":
+            if req.kind in ("actions", "action_results"):
                 pending_ids = {a["id"] for a in run.plan.get("actions", [])}
             elif req.kind == "tools":
                 pending_ids = {t["id"] for t in run.plan.get("toolCalls", [])}

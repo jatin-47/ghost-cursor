@@ -153,7 +153,8 @@ export function getWidgetStyles(primaryColor: string = '#6366f1'): string {
       margin: 0; line-height: 1.3;
     }
     .gc-close-btn {
-      margin-left: auto; background: rgba(255,255,255,0.15);
+      margin-left: auto;
+      background: rgba(255,255,255,0.15);
       border: none; color: white; width: 32px; height: 32px;
       border-radius: 8px; cursor: pointer; font-size: 18px;
       display: flex; align-items: center; justify-content: center;

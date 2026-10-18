@@ -90,7 +90,7 @@ export class GhostCursorWidget {
       </div>
       <div class="gc-messages" role="log" aria-live="polite">
         <div class="gc-msg assistant">
-          Hi! I'm Ghost Cursor, your AI co-pilot. I can navigate the app, fill forms, and answer questions for you. What would you like to do? 🚀
+          Hi! I'm Ghost Cursor, your AI co-pilot. I can navigate the app, fill forms, run guided tours, and answer questions for you. What would you like to do? 🚀
         </div>
       </div>
       <div class="gc-suggestions" style="display: none;"></div>

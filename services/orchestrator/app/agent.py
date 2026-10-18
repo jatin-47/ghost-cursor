@@ -220,20 +220,102 @@ class MockAgentProvider:
             }
 
         # --- Guided tour ---
-        if "how" in msg and ("track" in msg or "return" in msg or "find" in msg or "order" in msg):
-            return {
-                "reply": "Let me show you how! Follow this guided tour.",
-                "actions": [{
-                    "id": "act_1",
-                    "tool": "guided_tour",
-                    "parameters": {"steps": [
-                        {"target_id": "nav.orders", "message": "First, click on Orders in the navigation bar."},
-                        {"target_id": "orders.item.SH-1024", "message": "Here's your most recent order — SH-1024."},
-                        {"target_id": "orders.tracking_link", "message": "Click this link to see real-time tracking details."},
-                    ]},
-                }],
-                "status": "awaiting_actions",
-            }
+        is_tour_query = (
+            "tour" in msg
+            or "walkthrough" in msg
+            or "show me around" in msg
+            or "guide me" in msg
+            or ("guide" in msg and ("how" in msg or "show" in msg or "app" in msg or "store" in msg or "site" in msg))
+            or ("how" in msg and ("track" in msg or "return" in msg or "find" in msg or "order" in msg))
+        )
+        if is_tour_query:
+            if "order" in msg or "return" in msg or page == "orders":
+                return {
+                    "reply": "Let me show you how to track orders and returns! Follow this guided tour.",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "nav.orders", "message": "First, click on Orders in the navigation bar.", "page": "/orders"},
+                            {"target_id": "orders.item.SH-1024", "message": "Here is your most recent order — SH-1024 with status and progress timeline.", "page": "/orders"},
+                            {"target_id": "orders.tracking_link", "message": "Click this link to see real-time carrier tracking details and return options.", "page": "/orders"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            elif "setting" in msg or "theme" in msg or page == "settings":
+                return {
+                    "reply": "Here is a guided tour of the Settings page!",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "nav.settings", "message": "Settings can be reached from the top navigation bar.", "page": "/settings"},
+                            {"target_id": "settings.theme_toggle", "message": "Toggle between Light and Dark mode appearance.", "page": "/settings"},
+                            {"target_id": "settings.notif_email", "message": "Customize your notification channels (Email, SMS, and Push).", "page": "/settings"},
+                            {"target_id": "settings.saved_address", "message": "Review and update your default shipping address.", "page": "/settings"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            elif "cart" in msg or page == "cart":
+                return {
+                    "reply": "Here is a guided tour of your shopping cart!",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "nav.cart", "message": "Access your cart anytime from the navigation header.", "page": "/cart"},
+                            {"target_id": "cart.promo_code", "message": "Enter discount coupon codes like SAVE20 or FREESHIP.", "page": "/cart"},
+                            {"target_id": "cart.apply_promo", "message": "Click Apply Promo to instantly discount your total.", "page": "/cart"},
+                            {"target_id": "cart.checkout_btn", "message": "Click checkout when ready to proceed to shipping and payment.", "page": "/cart"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            elif "checkout" in msg or page == "checkout":
+                return {
+                    "reply": "Let me walk you through the checkout process!",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "checkout.address.street", "message": "Provide your delivery street address.", "page": "/checkout"},
+                            {"target_id": "checkout.address.city", "message": "Enter your delivery city, state, and postal code.", "page": "/checkout"},
+                            {"target_id": "checkout.place_order", "message": "Review order totals and click Place Order to finalize.", "page": "/checkout"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            elif "product" in msg or page in ("products", "product"):
+                return {
+                    "reply": "Here is a guided tour of this product page!",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "product.title", "message": "View product title, style details, and current price."},
+                            {"target_id": "product.size.10", "message": "Select your shoe size from real-time available stock."},
+                            {"target_id": "product.add_to_cart_btn", "message": "Click Add to Cart to add this item to your bag."},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            else:
+                return {
+                    "reply": "Welcome to ShopHive! Let me give you a quick guided tour of our store.",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "catalog.product.air-max-90", "message": "Footwear Catalog: Browse sneakers and click any pair to choose sizes.", "page": "/"},
+                            {"target_id": "nav.cart", "message": "Shopping Cart: Review your items, apply promo codes, and checkout.", "page": "/"},
+                            {"target_id": "nav.orders", "message": "Orders & Tracking: Track live package shipments and manage returns.", "page": "/"},
+                            {"target_id": "nav.settings", "message": "Settings: Switch to Dark Mode and customize notification preferences.", "page": "/"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
 
         # --- Stock / sizes ---
         if "size" in msg or "stock" in msg or "available" in msg:
@@ -312,11 +394,17 @@ class MockAgentProvider:
         # For tool results, generate a summary reply
         all_ok = all(r.get("ok", False) for r in results)
         if all_ok:
-            outputs = [r.get("output", "") for r in results if r.get("output") and str(r.get("output")).lower() != "completed"]
-            if outputs:
-                reply = f"Here's what I found: {'; '.join(str(o) for o in outputs)}"
+            is_tour = any("tour" in str(r.get("output", "")).lower() for r in results) or any(
+                a.get("tool") == "guided_tour" for a in run_state.get("plan", {}).get("actions", [])
+            )
+            if is_tour:
+                reply = "Tour completed! Let me know if you would like to explore anything else or perform any actions."
             else:
-                reply = "Done! All actions completed successfully."
+                outputs = [r.get("output", "") for r in results if r.get("output") and str(r.get("output")).lower() != "completed"]
+                if outputs:
+                    reply = f"Here's what I found: {'; '.join(str(o) for o in outputs)}"
+                else:
+                    reply = "Done! All actions completed successfully."
         else:
             errors = [r.get("error", "Unknown error") for r in results if not r.get("ok")]
             reply = f"Some actions couldn't be completed: {'; '.join(errors)}"
@@ -341,39 +429,39 @@ class MockAgentProvider:
         page_lower = page.lower()
         if "product" in page_lower:
             return [
+                "Take a guided tour of this product",
                 "What sizes are available in stock?",
                 "Can you add this item to my cart in size 10?",
-                "What is your 30-day return policy?"
             ][:count]
         elif "cart" in page_lower:
             return [
+                "Take a guided tour of cart",
                 "Can you apply promo code SAVE20?",
-                "What is the shipping cost?",
-                "Take me to checkout"
+                "Take me to checkout",
             ][:count]
         elif "checkout" in page_lower:
             return [
+                "Take a guided tour of checkout",
                 "Fill in my shipping address",
-                "What payment methods do you accept?",
-                "Is shipping free for this order?"
+                "Is shipping free for this order?",
             ][:count]
         elif "orders" in page_lower:
             return [
-                "Where is my order SH-1024?",
                 "Show me how to track returns",
-                "How long does refund processing take?"
+                "Where is my order SH-1024?",
+                "How long does refund processing take?",
             ][:count]
         elif "settings" in page_lower:
             return [
+                "Take a guided tour of settings",
                 "Switch appearance to Dark Mode",
                 "How do I update notification preferences?",
-                "Where can I change my shipping address?"
             ][:count]
         else:
             return [
+                "Take a guided tour",
                 "Show me popular running shoes",
                 "Do you offer free shipping?",
-                "Switch to Dark Mode"
             ][:count]
 
 

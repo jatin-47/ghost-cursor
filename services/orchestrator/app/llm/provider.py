@@ -215,16 +215,17 @@ Values on Screen: {context.get('values', {})}
 - toggle_switch: {{"target_id": "<registered_target_id>", "state": true|false, "explanation": "<reason>"}}
   * Toggle a switch/checkbox. E.g. For appearance/theme: Dark Mode = true, Light Mode = false.
 - guided_tour: {{"steps": [{{"target_id": "<target_id>", "message": "<step_message>"}}]}}
-  * Guide the user with spotlight callouts.
+  * Guide the user with spotlight callouts. When the user asks for a tour, guided tour, walkthrough, or asks how to do something on the page (e.g. 'show guided tour', 'take a tour', 'how do I track returns'), call `guided_tour` with sequential steps.
 
 ### CUSTOMER BACKEND TOOLS AVAILABLE:
 {backend_tools_str}
 
 ### PROTOCOL EXECUTION RULES:
-1. When the user requests a UI action (e.g. turn website to light mode, switch to dark mode, add to cart, fill form):
+1. When the user requests a UI action (e.g. turn website to light mode, switch to dark mode, add to cart, fill form) or guided tour:
    - You MUST populate `actions` with the step-by-step action sequence.
+   - For a guided tour or walkthrough request, use `tool: "guided_tour"` with a list of `steps` pointing to logical registered target IDs.
    - If the user is not on the required page yet (e.g. not on 'settings' page for appearance settings), include a `navigate` action first!
-   - In `reply`, provide a short, friendly conversational sentence explaining what you will do (e.g. "I'll switch the website to Light Mode for you."). NEVER put raw JSON or code blocks in `reply`!
+   - In `reply`, provide a short, friendly conversational sentence explaining what you will do (e.g. "I'll switch the website to Light Mode for you." or "Follow along with this guided tour!"). NEVER put raw JSON or code blocks in `reply`!
    - Set `status` to "awaiting_actions".
 2. If asking clarification, populate `questions` (with `question` and `options`) and set `status` to "awaiting_answer".
 3. If calling registered backend tools (e.g. lookup_order):
