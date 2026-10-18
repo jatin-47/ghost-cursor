@@ -43,23 +43,100 @@
    Detects missing inputs or ambiguities and prompts the user with quick-reply cards prior to executing sensitive steps.
 4. **🎬 Guided Explainers:**  
    Renders dynamic spotlights, interactive tooltips, and narrated tours across the interface to onboard users.
-5. **📊 Business Tools & ROI Insights:**  
-   Directly queries customer APIs and analytics to provide live data, margin calculations, and interactive sensitivity cards.
+5. **📊 Internal Business Tools:**  
+   Directly queries customer APIs and analytics to provide live data backed response making it platform native.
 
 ---
 
 ## Slide 4: Process Flow & Use-Case Diagram (Q4)
 
 ```mermaid
+
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "background": "#FFFFFF",
+    "mainBkg": "#FFFFFF",
+    "primaryColor": "#FFFFFF",
+    "primaryTextColor": "#172B4D",
+    "primaryBorderColor": "#64748B",
+    "lineColor": "#64748B",
+    "secondaryColor": "#F1F6FC",
+    "tertiaryColor": "#FFF3EA",
+    "clusterBkg": "#FFFFFF",
+    "clusterBorder": "#B8C5D6",
+    "fontFamily": "Arial",
+    "fontSize": "13px"
+  },
+  "flowchart": {
+    "htmlLabels": true,
+    "curve": "linear",
+    "nodeSpacing": 20,
+    "rankSpacing": 32,
+    "padding": 6,
+    "useMaxWidth": true
+  }
+}}%%
+
 flowchart LR
-    A["🧑 User Query<br/>+ Live Screen Context"] --> B["⚡ FE SDK &<br/>Backend Gateway"]
-    B --> C["📄 Dynamic Brain Loader<br/>(platform.md + {page}.md)"]
-    C --> D["☁️ Google ADK Agent<br/>(Gemini 2.0 / Python)"]
-    D --> E{"Agent Calls Tool"}
-    E -->|"navigate / click / fill"| F["🎯 Tool JSON Sent to FE<br/>AI Cursor Executes on DOM"]
-    E -->|"ask_clarification"| G["❓ Quick Clarification<br/>Prompt to User"]
-    E -->|"guided_tour"| H["🎬 Spotlight Tour<br/>Overlay on App"]
-    E -->|"calculate_roi"| I["📊 Query Backend API<br/>& Show Data Card"]
+    EU["End User"]
+    ADMIN["Customer Admin / Developer"]
+
+    subgraph CUSTOMER["CUSTOMER PLATFORM"]
+        direction TB
+        CHAT(["Chat & Task Delegation"])
+        CONTEXT(["Capture Screen Context"])
+        BRAIN(["Enrich with Platform Brain"])
+        CUSTOM(["Register Custom Tools"])
+        EXEC(["Execute Backend Tools"])
+        UI(["Execute Approved UI Actions"])
+        DISPLAY(["Display Answer & Guidance"])
+
+        CHAT --> CONTEXT --> BRAIN
+        CUSTOM -.-> BRAIN
+        EXEC --> DISPLAY
+        UI --> DISPLAY
+    end
+
+    subgraph SAAS["GHOST CURSOR SAAS"]
+        direction TB
+        REQ(["Receive Enriched Request"])
+        REASON(["Reason & Select Tools"])
+        PLAN(["Generate Tool Instructions"])
+        ORCH(["Orchestrate Multi-Step Calls"])
+        RESULTS(["Process Results & Continue"])
+        FINAL(["Return Final Response"])
+
+        REQ --> REASON --> PLAN
+        PLAN --> ORCH --> RESULTS
+        RESULTS -. "More steps" .-> REASON
+        RESULTS --> FINAL
+    end
+
+    EU --- CHAT
+    EU --- UI
+    EU --- DISPLAY
+    ADMIN --- CUSTOM
+
+    BRAIN --> REQ
+    PLAN --> BRAIN
+    BRAIN --> EXEC
+    BRAIN --> UI
+    FINAL --> DISPLAY
+
+    classDef actor fill:#FFFFFF,stroke:#334155,color:#172B4D,stroke-width:1.5px
+    classDef customer fill:#F1F6FC,stroke:#5279A5,color:#173653,stroke-width:1.2px
+    classDef saas fill:#FFF3EA,stroke:#D87942,color:#663718,stroke-width:1.2px
+
+    class EU,ADMIN actor
+    class CHAT,CONTEXT,BRAIN,CUSTOM,EXEC,UI,DISPLAY customer
+    class REQ,REASON,PLAN,ORCH,RESULTS,FINAL saas
+
+    style CUSTOMER fill:#FFFFFF,stroke:#5279A5,stroke-width:1.5px
+    style SAAS fill:#FFFFFF,stroke:#D87942,stroke-width:1.5px
+
+    linkStyle default stroke:#64748B,stroke-width:1.2px
+
 ```
 
 * **Core Actors:** End-User (natural interaction, task delegation, approval gate) & Business Admin (branding, capabilities, Brain configuration).
@@ -89,47 +166,112 @@ flowchart LR
 ## Slide 6: Architecture Diagram (Q6)
 
 ```mermaid
-flowchart TD
-    subgraph Browser["Customer Web App (Browser)"]
-        UI["Host Website UI"]
-        SDK["@ghost-cursor/sdk<br/>(Preact Widget + Context Scanner + Fixed Action Executors)"]
-        UI <--> SDK
+%%{init: {'flowchart': {'nodeSpacing': 20, 'rankSpacing': 35, 'curve': 'basis'}, 'themeVariables': {'clusterBkg': 'transparent', 'clusterBorder': 'transparent'}}}%%
+flowchart LR
+subgraph LeftCol[" "]
+direction TB
+subgraph ClientLayer["Frontend Layer — Firebase Hosting"]
+direction TB
+UI["ShopHive React Frontend
+
+
+
+(Vite + React 18 + Tailwind CSS)"]
+SDK["Ghost Cursor Frontend SDK
+
+
+
+(@ghost-cursor/sdk)
+
+
+
+- Isolated Shadow DOM Chat Widget
+
+
+
+- Live Screen Context Scanner
+
+
+
+- Animated Cursor Engine
+
+
+
+- DOM Action Executors"]
+UI <--> SDK
+end
+end
+
+subgraph RightCol[" "]
+    direction TB
+    subgraph CustomerCloud["Customer Infrastructure — Google Cloud"]
+        direction LR
+        subgraph CustomerCR["Customer Backend (Cloud Run)"]
+            direction LR
+            CustBE["<b>ShopHive Backend API</b><br/>(FastAPI + Python 3.12)"]
+            ProxySDK["<b>Ghost Cursor Backend SDK</b><br/>- Dynamic Markdown Brain Loader<br/>- Customer Session Auth<br/>- Customer Tools Registry"]
+            CustBE <--> ProxySDK
+        end
+
+        subgraph CustomerDB["Customer Database (Cloud SQL)"]
+            direction TB
+            SQL["<b>Cloud SQL (PostgreSQL)</b><br/>- ShopHive Store Data (Catalog/Orders)<br/>- Customer Chat Store (Data Sovereignty)"]
+        end
+        CustBE <--> SQL
     end
 
-    subgraph CustomerBE["Customer Backend Gateway"]
-        Brain["Dynamic Brain Loader<br/>- brain/platform.md<br/>- brain/pages/{page}.md"]
-        Proxy["Gateway Adapter (Python / Node)<br/>- Enforces Session Auth<br/>- Injects Dynamic Brain"]
-        Brain --> Proxy
-    end
+    subgraph SaaSCloud["Ghost Cursor SaaS — Google Cloud"]
+        direction LR
+        subgraph SaaSCR["Ghost Cursor Orchestrator (Cloud Run)"]
+            direction TB
+            Orch["<b>SaaS Reasoning Engine</b><br/>(Python 3.12 + Google ADK)<br/>- Multi-Turn Run State Machine<br/>- Idempotency & Revision Locking<br/>- Out-of-Scope Guardrails<br/>- Suggested Prompts Generator"]
+        end
 
-    subgraph GCP["Ghost Cursor Cloud (Google Cloud Platform)"]
-        Run["Python 3.12 Orchestrator<br/>(Cloud Run + Google ADK)"]
-        Gemini["Vertex AI<br/>(Gemini 2.0 Flash / Pro)"]
-        SQL["Cloud SQL PostgreSQL 17<br/>(Transactional Run Store)"]
-        SM["Secret Manager<br/>(API Keys & Credentials)"]
+        subgraph GeminiAI["LLM Provider — Google Agent Platform"]
+            direction TB
+            Gemini["<b>Google Gemini Models</b><br/>(Gemini 2.0 Flash / Pro)<br/>- Natural Language Understanding<br/>- Complex Reasoning & Planning<br/>- Structured JSON Plan Generation"]
+        end
         
-        Run <--> Gemini
-        Run <--> SQL
-        Run <--> SM
+        Orch <--> Gemini
     end
 
-    SDK <-->|"Same-Origin POST / WS"| Proxy
-    Proxy <-->|"HTTPS + X-Ghost-Subject"| Run
+    ProxySDK <-->|"Server-to-Server HTTPS<br/>Bearer API Key + X-Ghost-Subject"| Orch
+end
+
+SDK <-->|"Same-Origin HTTPS<br/>(/api/ghost-cursor)"| CustBE
+
+style LeftCol fill:none,stroke:none
+style RightCol fill:none,stroke:none
+style ClientLayer fill:#ffffde,stroke:#aaaa33,stroke-width:1px
+style CustomerCloud fill:#ffffde,stroke:#aaaa33,stroke-width:1px
+style CustomerCR fill:#ffffde,stroke:#aaaa33,stroke-width:1px
+style CustomerDB fill:#ffffde,stroke:#aaaa33,stroke-width:1px
+style SaaSCloud fill:#ffffde,stroke:#aaaa33,stroke-width:1px
+style SaaSCR fill:#ffffde,stroke:#aaaa33,stroke-width:1px
+style GeminiAI fill:#ffffde,stroke:#aaaa33,stroke-width:1px
+
 ```
 
 ---
 
 ## Slide 7: Technologies Used (Q7)
 
-* **Agentic Framework:** **Google Agent Development Kit (ADK)** in Python 3.12 for graph-based tool routing, function calling (`navigate`, `click`, `fill_input`), and human-in-the-loop approvals.
-* **AI & LLM Engine:** Google Cloud Vertex AI (Gemini 2.0 Flash for sub-second action planning, Gemini 2.0 Pro for complex reasoning).
-* **Cloud Infrastructure (GCP):**  
-  * *Cloud Run:* Serverless container hosting with autoscaling (scale-to-zero when idle).  
-  * *Cloud SQL (PostgreSQL 17):* Authoritative ACID multi-tenant run store with row-level revision locking.  
-  * *Secret Manager & Cloud Armor:* Centralized credential management and edge WAF protection.  
-  * *Cloud Storage + CDN:* Edge distribution for compiled SDK assets.
-* **Backend Runtime:** Python 3.12, FastAPI (async WebSockets), Pydantic v2, PostgreSQL driver (`psycopg3`/`asyncpg`).
-* **Frontend Core:** TypeScript, Preact (~3KB isolated Shadow DOM widget), Web Animations API, native DOM prototype dispatchers.
+* **Agentic Framework:** **Google Agent Development Kit (ADK)** in Python 3.12 for agentic orchestration, tool selection, function calling (`navigate`, `click`, `fill_input`, `select_option`, `toggle_switch`, `guided_tour`), multi-step execution, discrete plan validation, and human-in-the-loop approvals.
+* **AI & LLM Engine:** **Google Gemini models** (Gemini 3.5 Flash) via Google Agent Platform as the LLM provider for natural-language understanding, context-aware action planning, dynamic suggested questions generation, and strict out-of-scope guardrails.
+* **Cloud Infrastructure (Google Cloud Platform):**  
+  * *Firebase Hosting:* Global CDN hosting and deployment of the React-based frontend application.  
+  * *Cloud Run:* Serverless container hosting with autoscaling for **two independent backend services**:  
+    1. **Ghost Cursor SaaS Orchestrator:** The multi-tenant reasoning and state management engine.  
+    2. **ShopHive Demo Customer Backend:** The customer API gateway and SDK proxy.  
+  * *Cloud SQL (PostgreSQL):* Persistent managed storage for ShopHive's application data (catalog, orders) and customer-owned chat store, ensuring complete customer data sovereignty.  
+  * *Google Cloud:* Managed infrastructure for deploying, securing, and operating Ghost Cursor cloud services.  
+  * *Secret Manager:* Secure credential management for tenant service keys and GCP credentials.
+* **Ghost Cursor SDKs:**  
+  * *Frontend SDK (`@ghost-cursor/sdk`):* Embeddable chat interface within an isolated Shadow DOM (`Plus Jakarta Sans` typography, sanitized markdown renderer), live screen-context capture, animated Ghost Cursor, and in-browser DOM action execution with approval controls.  
+  * *Backend SDK (`@ghost-cursor/backend` / `ghost_cursor` Python):* Customer-platform context enrichment via dynamic Markdown Brain loader (`platform.md` + page-specific `.md`), gateway request proxying to Ghost Cursor SaaS, session identity injection (`X-Ghost-Subject`), and customer backend tools registration (`lookup_order`, `simulate_discount_roi`).
+* **Backend Runtime:** Python 3.12, FastAPI, asynchronous request handling, Pydantic v2 validation, SQLAlchemy (asyncio with `greenlet`), and PostgreSQL connectivity (`asyncpg`).
+* **Frontend Core:** React 18, TypeScript, Tailwind CSS, Vite, native DOM MutationObserver, and Web Component Shadow DOM APIs (`<ghost-cursor-widget>`) for total style isolation.
+* **Demo Customer — ShopHive:** A fully functional e-commerce platform demonstrating end-to-end SDK integration, customer-specific Brain context, customer database tools, SaaS communication, and execution of AI-directed actions within a customer's application.
 
 ---
 
