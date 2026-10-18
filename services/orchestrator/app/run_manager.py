@@ -204,6 +204,12 @@ class RunManager:
                 detail=f"Invalid continuation kind '{req.kind}' for status '{run.status}'. Expected: {allowed}",
             )
 
+        # Update run context immediately if a fresh context snapshot is supplied
+        if req.context:
+            run.context = req.context.model_dump()
+            run.context.setdefault("run_id", run.id)
+            run.context.setdefault("subject", run.subject)
+
         # Handle cancellation
         if req.kind == "cancel":
             run.status = "cancelled"
@@ -228,9 +234,9 @@ class RunManager:
 
                 agent_result = await self.provider.generate(
                     message=req.answer,
-                    context=req.context.model_dump() if req.context else run.context,
+                    context=run.context,
                     brain=run.brain,
-                    targets=(req.context.model_dump() if req.context else run.context).get("availableTargets", []),
+                    targets=run.context.get("availableTargets", []),
                     tools=run.tools,
                     client_config=tenant_cfg,
                     history=list(run.history),

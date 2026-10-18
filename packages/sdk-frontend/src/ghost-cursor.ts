@@ -328,9 +328,12 @@ export function createGhostCursor(config: GhostCursorConfig): GhostCursorInstanc
       if (currentRunId) {
         widget.showLoading();
         const eventId = crypto.randomUUID();
+        const context = contextProvider.scanContext(getPage());
         apiClient.continueRun(
           currentRunId, eventId, currentRevision, 'action_results',
-          [{ id: tourAction.id, ok: true, output: 'Tour completed' }]
+          [{ id: tourAction.id, ok: true, output: 'Tour completed' }],
+          undefined,
+          context,
         ).then(handleResponse).catch(() => widget.setInputDisabled(false));
       }
     });

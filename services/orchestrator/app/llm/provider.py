@@ -184,6 +184,27 @@ class VertexAILLMProvider(LLMProvider):
         """Construct the Gemini system instruction prompt with backend tools declarations."""
         backend_tools_str = self._format_tools(tools)
 
+        if not targets:
+            targets_str = "No targets registered on current page."
+        elif isinstance(targets, list):
+            lines = []
+            for t in targets:
+                if isinstance(t, str):
+                    lines.append(f"- {t}")
+                elif isinstance(t, dict):
+                    name = t.get("name") or t.get("id") or str(t)
+                    desc = t.get("description", "")
+                    lines.append(f"- {name}" + (f": {desc}" if desc else ""))
+                else:
+                    lines.append(f"- {t}")
+            targets_str = "\n".join(lines)
+        else:
+            targets_str = str(targets)
+
+        values = context.get("values", {})
+        values_str = json.dumps(values, indent=2) if values else "{}"
+        page_str = context.get("page", "unknown")
+
         return f"""You are Ghost Cursor, an autonomous UI co-pilot for {app_name}.
 You assist users by invoking frontend action tools to operate this {app_type}'s user interface,
 or querying customer backend knowledge tools for customer database and business context.
@@ -212,11 +233,12 @@ You MUST reply straightforwardly with:
 {brain}
 
 ### REGISTERED AVAILABLE UI TARGETS:
-{targets}
+{targets_str}
 
 ### LIVE SCREEN CONTEXT:
-Page: {context.get('page', 'unknown')}
-Values on Screen: {context.get('values', {})}
+Page: {page_str}
+Values on Screen:
+{values_str}
 
 ### FRONTEND ACTION TOOLS AVAILABLE:
 - navigate: {{"target_page": "<page_name>", "explanation": "<reason>"}}
