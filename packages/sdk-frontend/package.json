@@ -13,6 +13,7 @@
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {

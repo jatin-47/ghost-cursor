@@ -13,17 +13,31 @@ const RESOLVE_TIMEOUT = 8000; // 8 seconds
 const POLL_INTERVAL = 200; // ms
 
 /** Safety-check: reject elements that shouldn't be automated. */
-function isSafeTarget(el: Element): boolean {
+export function isSafeTarget(el: Element): boolean {
   if (!el.isConnected) return false;
 
   const htmlEl = el as HTMLElement;
 
-  // Reject hidden/invisible elements
-  if (htmlEl.offsetParent === null && htmlEl.style.position !== 'fixed') return false;
-  if (htmlEl.hidden || htmlEl.getAttribute('aria-hidden') === 'true') return false;
-
   // Reject inert elements
   if (htmlEl.inert) return false;
+
+  // Reject explicitly hidden elements
+  if (htmlEl.hidden || htmlEl.getAttribute('aria-hidden') === 'true') return false;
+
+  // Reject hidden/invisible elements
+  const isFixed = htmlEl.style?.position === 'fixed' ||
+    (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function' && window.getComputedStyle(htmlEl).position === 'fixed');
+  if (htmlEl.offsetParent === null && !isFixed) {
+    if (htmlEl.style?.display === 'none' || htmlEl.style?.visibility === 'hidden') return false;
+    if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+      try {
+        const style = window.getComputedStyle(htmlEl);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+      } catch {
+        // Ignore style computation errors
+      }
+    }
+  }
 
   // Reject disabled elements
   if ((el as HTMLInputElement).disabled) return false;
@@ -32,7 +46,7 @@ function isSafeTarget(el: Element): boolean {
   const inputEl = el as HTMLInputElement;
   if (inputEl.tagName === 'INPUT') {
     const sensitiveTypes = ['password', 'file', 'hidden'];
-    if (sensitiveTypes.includes(inputEl.type.toLowerCase())) return false;
+    if (sensitiveTypes.includes((inputEl.type || '').toLowerCase())) return false;
   }
 
   return true;

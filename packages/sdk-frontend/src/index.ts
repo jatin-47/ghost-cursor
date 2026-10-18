@@ -7,6 +7,8 @@
  */
 
 export { createGhostCursor } from './ghost-cursor';
+export { ContextProvider } from './core/context-provider';
+export { resolveTarget, isSafeTarget } from './core/target-resolver';
 export type {
   GhostCursorConfig,
   GhostCursorInstance,
