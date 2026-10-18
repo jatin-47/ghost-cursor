@@ -184,6 +184,27 @@ class VertexAILLMProvider(LLMProvider):
         """Construct the Gemini system instruction prompt with backend tools declarations."""
         backend_tools_str = self._format_tools(tools)
 
+        if not targets:
+            targets_str = "No targets registered on current page."
+        elif isinstance(targets, list):
+            lines = []
+            for t in targets:
+                if isinstance(t, str):
+                    lines.append(f"- {t}")
+                elif isinstance(t, dict):
+                    name = t.get("name") or t.get("id") or str(t)
+                    desc = t.get("description", "")
+                    lines.append(f"- {name}" + (f": {desc}" if desc else ""))
+                else:
+                    lines.append(f"- {t}")
+            targets_str = "\n".join(lines)
+        else:
+            targets_str = str(targets)
+
+        values = context.get("values", {})
+        values_str = json.dumps(values, indent=2) if values else "{}"
+        page_str = context.get("page", "unknown")
+
         return f"""You are Ghost Cursor, an autonomous UI co-pilot for {app_name}.
 You assist users by invoking frontend action tools to operate this {app_type}'s user interface,
 or querying customer backend knowledge tools for customer database and business context.
@@ -212,11 +233,12 @@ You MUST reply straightforwardly with:
 {brain}
 
 ### REGISTERED AVAILABLE UI TARGETS:
-{targets}
+{targets_str}
 
 ### LIVE SCREEN CONTEXT:
-Page: {context.get('page', 'unknown')}
-Values on Screen: {context.get('values', {})}
+Page: {page_str}
+Values on Screen:
+{values_str}
 
 ### FRONTEND ACTION TOOLS AVAILABLE:
 - navigate: {{"target_page": "<page_name>", "explanation": "<reason>"}}
@@ -379,14 +401,41 @@ If further actions, backend tool calls, or clarification questions are needed, s
         if isinstance(parsed, dict):
             reply = parsed.get("reply")
             actions = parsed.get("actions", [])
-            questions = parsed.get("questions", [])
             raw_tool_calls = parsed.get("toolCalls") or parsed.get("tool_calls", [])
+            if not isinstance(raw_tool_calls, list):
+                raw_tool_calls = [raw_tool_calls] if isinstance(raw_tool_calls, dict) else []
+            else:
+                raw_tool_calls = list(raw_tool_calls)
+
+            # Normalize questions
+            raw_questions = parsed.get("questions") or parsed.get("question") or parsed.get("clarifications") or parsed.get("clarification") or []
+            if isinstance(raw_questions, (str, dict)):
+                raw_questions = [raw_questions]
+            elif not isinstance(raw_questions, list):
+                raw_questions = []
+
+            normalized_questions = []
+            for q in raw_questions:
+                if isinstance(q, str):
+                    q_text = q.strip()
+                    if q_text:
+                        normalized_questions.append({"question": q_text[:1000], "options": []})
+                elif isinstance(q, dict):
+                    q_text = str(q.get("question") or q.get("text") or q.get("prompt") or "").strip()
+                    if not q_text:
+                        continue
+                    raw_opts = q.get("options") or q.get("choices") or []
+                    if not isinstance(raw_opts, list):
+                        raw_opts = []
+                    opts = [str(opt)[:200] for opt in raw_opts[:25]]
+                    normalized_questions.append({"question": q_text[:1000], "options": opts})
+            normalized_questions = normalized_questions[:5]
 
             # If reply itself was accidentally set to raw JSON code block, clean it up
             if reply and (reply.strip().startswith("```") or reply.strip().startswith("{") or reply.strip().startswith("[")):
                 if actions:
                     reply = "I'll perform the planned actions for you."
-                elif questions:
+                elif normalized_questions:
                     reply = None
                 elif raw_tool_calls:
                     reply = "I'll look that up for you."
@@ -394,17 +443,39 @@ If further actions, backend tool calls, or clarification questions are needed, s
                     reply = "Here is what I found."
 
             # Normalize actions
+            if not isinstance(actions, list):
+                actions = [actions] if isinstance(actions, dict) else []
+
             normalized_actions = []
             for idx, a in enumerate(actions):
                 if not isinstance(a, dict):
                     continue
                 a_id = a.get("id") or f"act_{idx + 1}"
+                a_id = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(a_id))
                 a_tool = a.get("tool") or a.get("name") or a.get("action") or "navigate"
-                a_params = a.get("parameters") or a.get("arguments") or {}
+                a_tool = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(a_tool))
+
+                # Unpack parameters from root level if omitted in nested parameters key
+                a_params = a.get("parameters") or a.get("arguments")
+                if not isinstance(a_params, dict) or not a_params:
+                    a_params = {k: v for k, v in a.items() if k not in ("id", "tool", "name", "action", "type", "parameters", "arguments")}
+                else:
+                    a_params = dict(a_params)
+
                 if a_tool == "navigate" and "path" in a_params and "target_page" not in a_params:
                     a_params["target_page"] = str(a_params.pop("path")).lstrip("/")
                 elif a_tool == "navigate" and "target_page" in a_params:
                     a_params["target_page"] = str(a_params["target_page"]).lstrip("/")
+
+                # If tool is actually a backend tool, route to tool_calls
+                if a_tool in backend_tool_names:
+                    raw_tool_calls.append({
+                        "id": a_id,
+                        "tool": a_tool,
+                        "parameters": a_params,
+                    })
+                    continue
+
                 normalized_actions.append({
                     "id": a_id,
                     "tool": a_tool,
@@ -412,17 +483,37 @@ If further actions, backend tool calls, or clarification questions are needed, s
                 })
 
             # Normalize tool_calls: drop empty or undeclared tool names
+            if not isinstance(raw_tool_calls, list):
+                raw_tool_calls = [raw_tool_calls] if isinstance(raw_tool_calls, dict) else []
+
             normalized_tool_calls = []
             for idx, tc in enumerate(raw_tool_calls):
                 if not isinstance(tc, dict):
                     continue
                 tc_tool = (tc.get("tool") or tc.get("name") or "").strip()
-                if not tc_tool or tc_tool not in backend_tool_names:
+                if not tc_tool:
                     continue
                 tc_id = tc.get("id") or f"tc_{len(normalized_tool_calls) + 1}"
-                tc_params = tc.get("parameters") or tc.get("arguments") or {}
-                if not isinstance(tc_params, dict):
-                    tc_params = {}
+                tc_id = re.sub(r"[^a-zA-Z0-9_.:\-]", "_", str(tc_id))
+
+                tc_params = tc.get("parameters") or tc.get("arguments")
+                if not isinstance(tc_params, dict) or not tc_params:
+                    tc_params = {k: v for k, v in tc.items() if k not in ("id", "tool", "name", "action", "type", "parameters", "arguments")}
+                else:
+                    tc_params = dict(tc_params)
+
+                # If tool is actually a frontend action tool, route to normalized_actions
+                if tc_tool in ("navigate", "click", "fill_input", "select_option", "toggle_switch", "guided_tour"):
+                    normalized_actions.append({
+                        "id": tc_id,
+                        "tool": tc_tool,
+                        "parameters": tc_params,
+                    })
+                    continue
+
+                if tc_tool not in backend_tool_names:
+                    continue
+
                 normalized_tool_calls.append({
                     "id": tc_id,
                     "tool": tc_tool,
@@ -434,46 +525,46 @@ If further actions, backend tool calls, or clarification questions are needed, s
             if indicated_status == "awaiting_tools" and normalized_tool_calls:
                 status = "awaiting_tools"
                 normalized_actions = []
-                questions = []
+                normalized_questions = []
                 if not reply:
                     reply = "I'll look that up for you."
             elif indicated_status == "awaiting_actions" and normalized_actions:
                 status = "awaiting_actions"
                 normalized_tool_calls = []
-                questions = []
+                normalized_questions = []
                 if not reply:
                     reply = "I'll execute the planned actions for you."
-            elif indicated_status == "awaiting_answer" and questions:
+            elif indicated_status == "awaiting_answer" and normalized_questions:
+                status = "awaiting_answer"
+                normalized_actions = []
+                normalized_tool_calls = []
+            elif normalized_actions:
+                status = "awaiting_actions"
+                normalized_questions = []
+                normalized_tool_calls = []
+                if not reply:
+                    reply = "I'll execute the planned actions for you."
+            elif normalized_questions:
                 status = "awaiting_answer"
                 normalized_actions = []
                 normalized_tool_calls = []
             elif normalized_tool_calls:
                 status = "awaiting_tools"
                 normalized_actions = []
-                questions = []
+                normalized_questions = []
                 if not reply:
                     reply = "I'll look that up for you."
-            elif normalized_actions:
-                status = "awaiting_actions"
-                questions = []
-                normalized_tool_calls = []
-                if not reply:
-                    reply = "I'll execute the planned actions for you."
-            elif questions:
-                status = "awaiting_answer"
-                normalized_actions = []
-                normalized_tool_calls = []
             else:
                 status = "completed"
                 normalized_actions = []
-                questions = []
+                normalized_questions = []
                 normalized_tool_calls = []
                 if not reply:
                     reply = raw_text
 
             return {
                 "reply": reply,
-                "questions": questions,
+                "questions": normalized_questions,
                 "actions": normalized_actions,
                 "toolCalls": normalized_tool_calls,
                 "status": status,

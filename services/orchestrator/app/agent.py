@@ -295,7 +295,13 @@ class MockAgentProvider:
 
         msg = message.lower().strip()
         orig = (original_message or "").lower().strip()
-        page = context.get("page", "")
+        raw_page = context.get("page", "").strip("/").lower()
+        if not raw_page or raw_page in ("catalog", "home", "index"):
+            page = "dashboard"
+        elif raw_page.startswith("product"):
+            page = "products"
+        else:
+            page = raw_page
 
         # --- Clarification answer: Checkout shipping address ---
         if ("checkout" in orig or "address" in orig) and ("123" in msg or "main" in msg or "saved" in msg or "address" in msg or "new" in msg):
@@ -338,6 +344,16 @@ class MockAgentProvider:
             if "light" in msg:
                 is_dark = False
             theme_name = "Dark" if is_dark else "Light"
+
+            # Check if theme is already in the requested state from live screen values
+            current_theme_state = context.get("values", {}).get("settings.theme_toggle")
+            if current_theme_state is not None and current_theme_state == is_dark and page == "settings":
+                return {
+                    "reply": f"{theme_name} Mode is already enabled.",
+                    "actions": [],
+                    "status": "completed",
+                }
+
             if page != "settings":
                 actions.append({
                     "id": "act_1",

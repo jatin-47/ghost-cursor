@@ -254,6 +254,7 @@ class GhostCursorBackend:
                 "toolCalls": [],
             }
 
+
     async def _tool_loop(self, response: dict, user_id: str) -> dict:
         """Execute local tools if the Cloud returns awaiting_tools status."""
         rounds = 0

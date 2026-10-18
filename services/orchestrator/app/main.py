@@ -279,8 +279,16 @@ async def continue_run(run_id: str, request: Request):
         raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)[:200]}")
 
     run_manager: RunManager = request.app.state.run_manager
-    result = await run_manager.continue_run(run_id, tenant_id, subject, req)
-    return result
+    try:
+        result = await run_manager.continue_run(run_id, tenant_id, subject, req)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unhandled error in continue_run {run_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal error processing continuation: {str(e)[:200]}")
+
+
 
 
 # ---------------------------------------------------------------------------

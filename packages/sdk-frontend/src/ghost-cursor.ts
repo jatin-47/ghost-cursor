@@ -62,14 +62,18 @@ export function createGhostCursor(config: GhostCursorConfig): GhostCursorInstanc
     theme.icon,
   );
 
+  let lastLoadedTargetCount = -1;
+
   async function loadSuggestionsForCurrentPage(force: boolean = false): Promise<void> {
     if (disposed || isExecuting) return;
     const page = getPage();
-    if (!force && page === lastLoadedPage) return;
+    const context = contextProvider.scanContext(page);
+    const targetCount = context.availableTargets.length;
+    if (!force && page === lastLoadedPage && targetCount === lastLoadedTargetCount) return;
     lastLoadedPage = page;
+    lastLoadedTargetCount = targetCount;
     try {
-      const activeTargets = Object.keys(targets);
-      const suggestions = await apiClient.getSuggestions(page, activeTargets);
+      const suggestions = await apiClient.getSuggestions(page, context.availableTargets);
       if (!disposed && suggestions && suggestions.length > 0) {
         widget.setSuggestions(suggestions);
       } else {
@@ -80,10 +84,13 @@ export function createGhostCursor(config: GhostCursorConfig): GhostCursorInstanc
     }
   }
 
-  // Auto-detect page navigation
+  // Auto-detect page navigation and DOM target changes
   if (typeof window !== 'undefined') {
     window.addEventListener('popstate', () => loadSuggestionsForCurrentPage());
   }
+  contextProvider.startObserving(() => {
+    loadSuggestionsForCurrentPage();
+  });
   const pageCheckInterval = setInterval(() => {
     if (!disposed) loadSuggestionsForCurrentPage();
   }, 1200);
@@ -321,9 +328,12 @@ export function createGhostCursor(config: GhostCursorConfig): GhostCursorInstanc
       if (currentRunId) {
         widget.showLoading();
         const eventId = crypto.randomUUID();
+        const context = contextProvider.scanContext(getPage());
         apiClient.continueRun(
           currentRunId, eventId, currentRevision, 'action_results',
-          [{ id: tourAction.id, ok: true, output: 'Tour completed' }]
+          [{ id: tourAction.id, ok: true, output: 'Tour completed' }],
+          undefined,
+          context,
         ).then(handleResponse).catch(() => widget.setInputDisabled(false));
       }
     });
@@ -334,6 +344,7 @@ export function createGhostCursor(config: GhostCursorConfig): GhostCursorInstanc
     dispose() {
       disposed = true;
       clearInterval(pageCheckInterval);
+      contextProvider.stopObserving();
       widget.dispose();
       cursorEngine.dispose();
       tourEngine.dispose();

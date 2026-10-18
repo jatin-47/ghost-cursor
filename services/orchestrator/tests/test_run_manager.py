@@ -198,3 +198,105 @@ async def test_guided_tour_page_aware_steps(run_manager):
     assert "Take a guided tour" in suggestions
 
 
+@pytest.mark.asyncio
+async def test_question_item_handles_numeric_and_many_options():
+    """Verify QuestionItem supports float/int shoe sizes and truncates over 25 options."""
+    from app.models import QuestionItem
+    shoe_sizes = [7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13]
+    item = QuestionItem(question="What size would you like?", options=shoe_sizes)
+    assert len(item.options) == 13
+    assert item.options[0] == "7"
+    assert item.options[1] == "7.5"
+    assert item.options[-1] == "13"
+
+    # Truncation beyond 25
+    large_list = list(range(35))
+    item2 = QuestionItem(question="Pick a number", options=large_list)
+    assert len(item2.options) == 25
+
+
+@pytest.mark.asyncio
+async def test_action_item_unpacks_root_parameters():
+    """Verify ActionItem extracts parameters specified at root level."""
+    from app.models import ActionItem
+    raw = {"id": "act_1", "tool": "click", "target_id": "product.size.10", "explanation": "Select size 10"}
+    item = ActionItem(**raw)
+    assert item.id == "act_1"
+    assert item.tool == "click"
+    assert item.parameters == {"target_id": "product.size.10", "explanation": "Select size 10"}
+
+
+@pytest.mark.asyncio
+async def test_continuation_with_clarification_question(run_manager):
+    """Verify continuing a run when the model asks for clarification with 13 shoe sizes."""
+    from unittest.mock import AsyncMock
+    shoe_sizes = [7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13]
+    clarification_plan = {
+        "reply": "Please select a size for the Air Max 90:",
+        "status": "awaiting_answer",
+        "questions": [{"question": "What size would you like?", "options": shoe_sizes}],
+        "actions": [],
+        "toolCalls": [],
+    }
+
+    # Create run on product page
+    req = CreateRunRequest(
+        protocolVersion="1",
+        requestId=uuid.uuid4(),
+        message="I want to order Air Max 90",
+        context=GhostContext(page="/product/air-max-90", availableTargets=[f"product.size.{s}" for s in shoe_sizes] + ["product.add_to_cart_btn"]),
+        brain="Test brain context",
+    )
+    resp = await run_manager.create_run("shophive_demo", "user_123", req)
+
+    # Mock continue_with_results to return the clarification question with 13 sizes
+    run_manager.provider.continue_with_results = AsyncMock(return_value=clarification_plan)
+
+    cont_req = ContinueRunRequest(
+        protocolVersion="1",
+        eventId=uuid.uuid4(),
+        revision=resp.revision,
+        kind="actions",
+        results=[ResultItem(id="act_1", ok=True)],
+        context=GhostContext(page="/product/air-max-90", availableTargets=[f"product.size.{s}" for s in shoe_sizes] + ["product.add_to_cart_btn"]),
+    )
+    # Give the run an initial action so pending_ids match
+    run = await run_manager.store.get_run(resp.runId, "shophive_demo", "user_123")
+    run["plan"] = {"actions": [{"id": "act_1", "tool": "click", "parameters": {}}]}
+    run["status"] = "awaiting_actions"
+    await run_manager.store.save_run(run)
+
+    cont_resp = await run_manager.continue_run(resp.runId, "shophive_demo", "user_123", cont_req)
+    assert cont_resp.status == "awaiting_answer"
+    assert len(cont_resp.questions) == 1
+    assert len(cont_resp.questions[0].options) == 13
+    assert cont_resp.questions[0].options[0] == "7"
+    assert cont_resp.questions[0].options[1] == "7.5"
+
+
+@pytest.mark.asyncio
+async def test_build_response_resilient_fallback(run_manager):
+    """Verify _build_response catches invalid models and safely falls back without 500 error."""
+    req = CreateRunRequest(
+        protocolVersion="1",
+        requestId=uuid.uuid4(),
+        message="Test fallback",
+        context=GhostContext(page="dashboard"),
+        brain="Test brain context",
+    )
+    resp = await run_manager.create_run("shophive_demo", "user_123", req)
+    run_data = await run_manager.store.get_run(resp.runId, "shophive_demo", "user_123")
+    run_state = RunState.from_dict(run_data)
+
+    # Corrupt the plan with invalid data
+    run_state.plan = {
+        "reply": "Test reply",
+        "actions": [{"invalid": "action without tool or id"}],
+    }
+    response = run_manager._build_response(run_state)
+    assert response.status == "completed"
+    assert response.runId == run_state.id
+    assert response.reply == "Test reply"
+
+
+
