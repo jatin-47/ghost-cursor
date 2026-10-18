@@ -15,10 +15,19 @@ from enum import Enum
 from typing import Any, Literal, Optional
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     Field,
     model_validator,
     field_validator,
+)
+
+from .contracts import (
+    HostedRunResponse,
+    ToolCallRequest,
+    ClarifyQuestion,
+    validate_actions,
+    validate_logical_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -116,7 +125,21 @@ class ToolDeclaration(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
-    parameters: dict[str, Any] = Field(default_factory=dict)
+    parameters: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("parameters", "inputSchema", "input_schema"),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_input_schema(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "parameters" not in data or not data["parameters"]:
+                if "inputSchema" in data and data["inputSchema"]:
+                    data["parameters"] = data["inputSchema"]
+                elif "input_schema" in data and data["input_schema"]:
+                    data["parameters"] = data["input_schema"]
+        return data
 
     @field_validator("name")
     @classmethod
@@ -247,7 +270,6 @@ class CreateRunRequest(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     tools: list[ToolDeclaration] = Field(default_factory=list)
     clientConfig: Optional[ClientConfig] = Field(default=None, description="Optional client-level configuration overrides")
-
 
 
 class ContinueRunRequest(BaseModel):

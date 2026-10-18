@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -75,18 +75,81 @@ def _check_rate_limit(key: str) -> bool:
     return False
 
 
+# Module-level instances for direct access / tests
+run_store: Optional[Any] = None
+vertex_client: Optional[Any] = None
+
+
+def init_globals():
+    """Ensure global services are initialized even if lifespan wasn't triggered (e.g. tests)"""
+    global run_store, vertex_client
+    ghost_env = os.getenv("GHOST_ENV", "development").lower()
+    ghost_provider = os.getenv("GHOST_PROVIDER")
+    ghost_store = os.getenv("GHOST_STORE", "memory")
+
+    if ghost_provider and ghost_provider not in ("mock", "vertex", "adk"):
+        raise RuntimeError(f"GHOST_PROVIDER must be 'mock', 'vertex', or 'adk', got: {ghost_provider!r}")
+
+    if ghost_provider == "adk":
+        project_id = os.getenv("GCP_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
+        if not project_id:
+            raise RuntimeError("GCP_PROJECT_ID or GOOGLE_CLOUD_PROJECT is required when GHOST_PROVIDER is 'adk'")
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+        if os.getenv("GCP_LOCATION") and not os.getenv("GOOGLE_CLOUD_LOCATION"):
+            os.environ["GOOGLE_CLOUD_LOCATION"] = os.environ["GCP_LOCATION"]
+
+    if ghost_store and ghost_store not in ("memory", "postgres"):
+        raise RuntimeError(f"GHOST_STORE must be 'memory' or 'postgres', got: {ghost_store!r}")
+
+    if ghost_env == "production":
+        if ghost_provider == "mock":
+            raise RuntimeError("mock provider is not allowed in production")
+        if ghost_store == "memory":
+            raise RuntimeError("memory store is not allowed in production")
+
+    if ghost_store == "postgres" and not os.getenv("DATABASE_URL"):
+        raise RuntimeError("DATABASE_URL is required when GHOST_STORE is 'postgres'")
+
+    if ghost_provider == "vertex" and not os.getenv("GCP_PROJECT_ID"):
+        raise RuntimeError("GCP_PROJECT_ID is required when GHOST_PROVIDER is 'vertex'")
+
+    if run_store is None:
+        run_store = MemoryRunStore()
+
+    if vertex_client is None:
+        if ghost_provider == "vertex":
+            from .llm.gemini import GeminiProvider
+            project_id = os.environ["GCP_PROJECT_ID"]
+            location = os.getenv("GCP_LOCATION", "us-central1")
+            model = os.getenv("GHOST_MODEL", "gemini-2.0-flash")
+            vertex_client = GeminiProvider(project=project_id, location=location, model=model)
+        elif ghost_provider == "adk":
+            from .llm.adk import ADKProvider
+            project_id = os.getenv("GCP_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
+            location = os.getenv("GCP_LOCATION") or os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+            model = os.getenv("GHOST_MODEL", "gemini-2.0-flash")
+            vertex_client = ADKProvider(project=project_id, location=location, model=model)
+        elif ghost_provider == "mock":
+            from .llm.provider import MockLLMProvider
+            vertex_client = MockLLMProvider()
+
+
 # ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize stores and providers on startup."""
-    store = MemoryRunStore()
+    init_globals()
+    store = getattr(app.state, "store", None) or run_store or MemoryRunStore()
     from .llm.provider import get_llm_provider
-    provider = get_llm_provider()
+    provider = getattr(app.state, "provider", None) or vertex_client or get_llm_provider()
     app.state.run_manager = RunManager(store=store, provider=provider)
-    logger.info(f"Ghost Cursor Orchestrator started (Store: MemoryStore, Provider: {provider.__class__.__name__})")
+    logger.info(f"Ghost Cursor Orchestrator started (Store: {store.__class__.__name__}, Provider: {provider.__class__.__name__})")
     yield
+    if provider and hasattr(provider, "close"):
+        await provider.close()
     logger.info("Ghost Cursor Orchestrator shutting down")
 
 

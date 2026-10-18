@@ -133,3 +133,68 @@ async def test_expired_run_returns_410(run_manager):
         await run_manager.continue_run(resp.runId, "shophive_demo", "user_123", cont_req)
     assert exc.value.status_code == 410
 
+
+@pytest.mark.asyncio
+async def test_guided_tour_creation_and_completion_with_action_results(run_manager):
+    """Verify guided tour creation, step structure, and completion via action_results."""
+    req = CreateRunRequest(
+        protocolVersion="1",
+        requestId=uuid.uuid4(),
+        message="Take a guided tour",
+        context=GhostContext(page="dashboard", values={}, availableTargets=[]),
+        brain="Test brain context",
+    )
+    resp = await run_manager.create_run("shophive_demo", "user_123", req)
+    assert resp.status == "awaiting_actions"
+    assert len(resp.actions) == 1
+    assert resp.actions[0].tool == "guided_tour"
+    assert "steps" in resp.actions[0].parameters
+    assert len(resp.actions[0].parameters["steps"]) >= 3
+
+    # Continue run using the frontend SDK's action_results kind
+    cont_req = ContinueRunRequest(
+        protocolVersion="1",
+        eventId=uuid.uuid4(),
+        revision=resp.revision,
+        kind="action_results",
+        results=[ResultItem(id=resp.actions[0].id, ok=True, output="Tour completed")],
+    )
+    resp2 = await run_manager.continue_run(resp.runId, "shophive_demo", "user_123", cont_req)
+    assert resp2.status == "completed"
+    assert "Tour completed" in resp2.reply
+
+
+@pytest.mark.asyncio
+async def test_guided_tour_page_aware_steps(run_manager):
+    """Verify page-specific guided tours and suggestions."""
+    # 1. Orders page returns tour
+    req_orders = CreateRunRequest(
+        protocolVersion="1",
+        requestId=uuid.uuid4(),
+        message="How do I track my return?",
+        context=GhostContext(page="orders", values={}, availableTargets=[]),
+        brain="Test brain context",
+    )
+    resp_orders = await run_manager.create_run("shophive_demo", "user_123", req_orders)
+    assert resp_orders.status == "awaiting_actions"
+    assert resp_orders.actions[0].tool == "guided_tour"
+    assert any("order" in s["target_id"] for s in resp_orders.actions[0].parameters["steps"])
+
+    # 2. Settings page tour
+    req_settings = CreateRunRequest(
+        protocolVersion="1",
+        requestId=uuid.uuid4(),
+        message="Show me around settings",
+        context=GhostContext(page="settings", values={}, availableTargets=[]),
+        brain="Test brain context",
+    )
+    resp_settings = await run_manager.create_run("shophive_demo", "user_123", req_settings)
+    assert resp_settings.status == "awaiting_actions"
+    assert resp_settings.actions[0].tool == "guided_tour"
+    assert any("theme_toggle" in s["target_id"] for s in resp_settings.actions[0].parameters["steps"])
+
+    # 3. Suggestion chips on dashboard include guided tour
+    suggestions = await run_manager.provider.generate_suggestions(page="dashboard", brain="", targets=[])
+    assert "Take a guided tour" in suggestions
+
+

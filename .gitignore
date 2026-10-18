@@ -4,6 +4,7 @@ node_modules/
 venv/
 __pycache__/
 *.pyc
+.python-version
 
 # Build outputs
 dist/
@@ -11,6 +12,7 @@ build/
 *.egg-info/
 *.whl
 *.tar.gz
+test-results/
 
 # Environment
 .env

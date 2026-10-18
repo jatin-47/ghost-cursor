@@ -49,18 +49,148 @@ def ask_clarification(question: str, options: List[str]) -> dict:
 FRONTEND_TOOLS = [navigate, click, fill_input, select_option, toggle_switch, guided_tour, ask_clarification]
 
 
+from dataclasses import dataclass, field
+import copy
+
+@dataclass
+class GhostAgent:
+    """Represents a configured Ghost Cursor agent instance."""
+    name: str
+    model: str
+    instruction: str
+    tools: List[Any]
+    brain_content: str = ""
+    available_targets: List[str] = field(default_factory=list)
+    current_context: Dict[str, Any] = field(default_factory=dict)
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+
+
+FRONTEND_ACTION_TOOLS = [
+    {
+        "name": "navigate",
+        "description": "Navigate to another page within the application",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_page": {"type": "string", "description": "Page identifier or path to navigate to"},
+                "explanation": {"type": "string", "description": "Why this navigation is needed"},
+            },
+            "required": ["target_page", "explanation"],
+        },
+    },
+    {
+        "name": "click",
+        "description": "Click a registered button, link, or tab",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string", "description": "Logical target ID"},
+                "explanation": {"type": "string", "description": "Why this click is needed"},
+            },
+            "required": ["target_id", "explanation"],
+        },
+    },
+    {
+        "name": "fill_input",
+        "description": "Type or set a value in a registered input or textarea",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string", "description": "Logical target ID"},
+                "value": {"type": "string", "description": "Value to type or enter"},
+                "explanation": {"type": "string", "description": "Why this input is needed"},
+            },
+            "required": ["target_id", "value", "explanation"],
+        },
+    },
+    {
+        "name": "select_option",
+        "description": "Select an option from a dropdown or select element",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string", "description": "Logical target ID"},
+                "option": {"type": "string", "description": "Option value to select"},
+                "explanation": {"type": "string", "description": "Why this selection is needed"},
+            },
+            "required": ["target_id", "option", "explanation"],
+        },
+    },
+    {
+        "name": "toggle_switch",
+        "description": "Toggle a switch or checkbox to true or false",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string", "description": "Logical target ID"},
+                "state": {"type": "boolean", "description": "Desired state (true/false)"},
+                "explanation": {"type": "string", "description": "Why this toggle is needed"},
+            },
+            "required": ["target_id", "state", "explanation"],
+        },
+    },
+    {
+        "name": "guided_tour",
+        "description": "Run an interactive guided tour spotlighting elements with explanations",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "target_id": {"type": "string"},
+                            "message": {"type": "string"},
+                        },
+                        "required": ["target_id", "message"],
+                    },
+                },
+            },
+            "required": ["steps"],
+        },
+    },
+    {
+        "name": "ask_clarification",
+        "description": "Ask the user a clarifying question before proceeding",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "maxLength": 1000},
+                "options": {"type": "array", "items": {"type": "string", "maxLength": 200}, "maxItems": 10},
+            },
+            "required": ["question", "options"],
+        },
+    },
+]
+
+
+def _format_targets(targets: list) -> str:
+    if not targets:
+        return "No targets registered on current page."
+    lines = []
+    for target in targets:
+        if isinstance(target, str):
+            lines.append(f"  - {target}")
+        elif isinstance(target, dict):
+            name = target.get("name", target.get("id", "unknown"))
+            desc = target.get("description", "")
+            lines.append(f"  - {name}" + (f" ({desc})" if desc else ""))
+    return "\n".join(lines) if lines else "No targets registered."
+
+
 def create_ghost_agent(
     brain_content: str,
     available_targets: list,
     current_context: dict,
     customer_backend_tools: Optional[list] = None,
-) -> dict:
-    """Build the agent configuration dict.
-
-    In a real deployment with google-adk installed, this would return
-    an actual google.adk.agents.llm_agent.Agent. For the hackathon
-    baseline, we return a config dict used by the MockProvider.
-    """
+) -> GhostAgent:
+    """Build the Ghost Cursor agent representation."""
     instruction = f"""You are Ghost Cursor, an autonomous UI co-pilot.
 You assist users by invoking frontend action tools to operate the web interface,
 or querying backend knowledge tools for customer database/business context.
@@ -69,7 +199,7 @@ or querying backend knowledge tools for customer database/business context.
 {brain_content}
 
 ### REGISTERED AVAILABLE UI TARGETS:
-{available_targets}
+{_format_targets(available_targets)}
 
 ### LIVE CLIENT CONTEXT:
 Current Page: {current_context.get('page', 'unknown')}
@@ -82,17 +212,52 @@ Values on Screen: {current_context.get('values', {})}
 4. Query customer backend tools whenever domain data is needed before taking action.
 5. Only return ONE tool invocation type per response turn.
 """
-    tools = list(FRONTEND_TOOLS)
+    tools = copy.deepcopy(FRONTEND_ACTION_TOOLS)
     if customer_backend_tools:
-        tools.extend(customer_backend_tools)
+        for t in customer_backend_tools:
+            if hasattr(t, "model_dump"):
+                tools.append(t.model_dump())
+            elif hasattr(t, "dict"):
+                tools.append(t.dict())
+            else:
+                tools.append(t)
 
-    return {
-        "name": "ghost_cursor_orchestrator",
-        "model": "gemini-2.0-flash",
-        "instruction": instruction,
-        "tools": tools,
-        "context": current_context,
-    }
+    return GhostAgent(
+        name="ghost_cursor_orchestrator",
+        model="gemini-2.0-flash",
+        instruction=instruction,
+        tools=tools,
+        brain_content=brain_content or "",
+        available_targets=available_targets or [],
+        current_context=current_context or {},
+    )
+
+
+def create_adk_agent(
+    brain_content: str,
+    available_targets: list,
+    current_context: dict,
+    customer_backend_tools: Optional[list] = None,
+    model: Any = "gemini-2.0-flash",
+) -> Any:
+    """Instantiate Google ADK Agent with long-running tools."""
+    from google.adk.agents.llm_agent import LlmAgent
+    from .llm.adk import build_adk_tools
+
+    ghost_agent = create_ghost_agent(
+        brain_content=brain_content,
+        available_targets=available_targets,
+        current_context=current_context,
+        customer_backend_tools=customer_backend_tools,
+    )
+    adk_tools = build_adk_tools(ghost_agent.tools)
+
+    return LlmAgent(
+        name=ghost_agent.name,
+        model=model,
+        instruction=lambda _ctx: ghost_agent.instruction,
+        tools=adk_tools,
+    )
 
 
 class MockAgentProvider:
@@ -102,7 +267,15 @@ class MockAgentProvider:
     for local testing without real GCP/Gemini credentials.
     """
 
-    def _match_patterns(self, message: str, context: dict, targets: list, client_config: Optional[Any] = None) -> dict:
+    def _match_patterns(
+        self,
+        message: str,
+        context: dict,
+        targets: list,
+        client_config: Optional[Any] = None,
+        history: Optional[list] = None,
+        original_message: Optional[str] = None,
+    ) -> dict:
         """Pattern-match user messages to generate realistic tool call responses."""
         from .guardrails import is_out_of_scope, get_guardrail_rejection
 
@@ -121,7 +294,42 @@ class MockAgentProvider:
             return get_guardrail_rejection(refusal_msg)
 
         msg = message.lower().strip()
+        orig = (original_message or "").lower().strip()
         page = context.get("page", "")
+
+        # --- Clarification answer: Checkout shipping address ---
+        if ("checkout" in orig or "address" in orig) and ("123" in msg or "main" in msg or "saved" in msg or "address" in msg or "new" in msg):
+            actions = []
+            if page != "checkout":
+                actions.append({
+                    "id": "act_1",
+                    "tool": "navigate",
+                    "parameters": {"target_page": "checkout", "explanation": "Navigating to checkout page."},
+                })
+            act_offset = len(actions) + 1
+            actions.extend([
+                {"id": f"act_{act_offset}", "tool": "fill_input", "parameters": {"target_id": "checkout.address.street", "value": "123 Main St", "explanation": "Filling in street address."}},
+                {"id": f"act_{act_offset+1}", "tool": "fill_input", "parameters": {"target_id": "checkout.address.city", "value": "New York", "explanation": "Filling in city."}},
+                {"id": f"act_{act_offset+2}", "tool": "fill_input", "parameters": {"target_id": "checkout.address.state", "value": "NY", "explanation": "Filling in state."}},
+                {"id": f"act_{act_offset+3}", "tool": "fill_input", "parameters": {"target_id": "checkout.address.zip", "value": "10001", "explanation": "Filling in zip code."}},
+            ])
+            return {
+                "reply": "I'll fill in the shipping address for you.",
+                "actions": actions,
+                "status": "awaiting_actions",
+            }
+
+        # --- Clarification answer: Order tracking selection ---
+        if ("order" in orig or "track" in orig) and "sh-" in msg:
+            import re
+            order_match = re.search(r"(SH-\d+|order\s*#?\s*\d+)", msg, re.IGNORECASE)
+            if order_match:
+                return {
+                    "reply": f"Let me look up {order_match.group(1)} for you.",
+                    "toolCalls": [{"id": "tc_1", "tool": "lookup_order", "parameters": {"order_id": order_match.group(1)}}],
+                    "actions": [],
+                    "status": "awaiting_tools",
+                }
 
         # --- Dark mode / Light mode / theme ---
         if any(kw in msg for kw in ["dark mode", "dark theme", "switch theme", "appearance", "light mode", "light theme", "light"]):
@@ -220,20 +428,102 @@ class MockAgentProvider:
             }
 
         # --- Guided tour ---
-        if "how" in msg and ("track" in msg or "return" in msg or "find" in msg or "order" in msg):
-            return {
-                "reply": "Let me show you how! Follow this guided tour.",
-                "actions": [{
-                    "id": "act_1",
-                    "tool": "guided_tour",
-                    "parameters": {"steps": [
-                        {"target_id": "nav.orders", "message": "First, click on Orders in the navigation bar."},
-                        {"target_id": "orders.item.SH-1024", "message": "Here's your most recent order — SH-1024."},
-                        {"target_id": "orders.tracking_link", "message": "Click this link to see real-time tracking details."},
-                    ]},
-                }],
-                "status": "awaiting_actions",
-            }
+        is_tour_query = (
+            "tour" in msg
+            or "walkthrough" in msg
+            or "show me around" in msg
+            or "guide me" in msg
+            or ("guide" in msg and ("how" in msg or "show" in msg or "app" in msg or "store" in msg or "site" in msg))
+            or ("how" in msg and ("track" in msg or "return" in msg or "find" in msg or "order" in msg))
+        )
+        if is_tour_query:
+            if "order" in msg or "return" in msg or page == "orders":
+                return {
+                    "reply": "Let me show you how to track orders and returns! Follow this guided tour.",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "nav.orders", "message": "First, click on Orders in the navigation bar.", "page": "/orders"},
+                            {"target_id": "orders.item.SH-1024", "message": "Here is your most recent order — SH-1024 with status and progress timeline.", "page": "/orders"},
+                            {"target_id": "orders.tracking_link", "message": "Click this link to see real-time carrier tracking details and return options.", "page": "/orders"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            elif "setting" in msg or "theme" in msg or page == "settings":
+                return {
+                    "reply": "Here is a guided tour of the Settings page!",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "nav.settings", "message": "Settings can be reached from the top navigation bar.", "page": "/settings"},
+                            {"target_id": "settings.theme_toggle", "message": "Toggle between Light and Dark mode appearance.", "page": "/settings"},
+                            {"target_id": "settings.notif_email", "message": "Customize your notification channels (Email, SMS, and Push).", "page": "/settings"},
+                            {"target_id": "settings.saved_address", "message": "Review and update your default shipping address.", "page": "/settings"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            elif "cart" in msg or page == "cart":
+                return {
+                    "reply": "Here is a guided tour of your shopping cart!",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "nav.cart", "message": "Access your cart anytime from the navigation header.", "page": "/cart"},
+                            {"target_id": "cart.promo_code", "message": "Enter discount coupon codes like SAVE20 or FREESHIP.", "page": "/cart"},
+                            {"target_id": "cart.apply_promo", "message": "Click Apply Promo to instantly discount your total.", "page": "/cart"},
+                            {"target_id": "cart.checkout_btn", "message": "Click checkout when ready to proceed to shipping and payment.", "page": "/cart"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            elif "checkout" in msg or page == "checkout":
+                return {
+                    "reply": "Let me walk you through the checkout process!",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "checkout.address.street", "message": "Provide your delivery street address.", "page": "/checkout"},
+                            {"target_id": "checkout.address.city", "message": "Enter your delivery city, state, and postal code.", "page": "/checkout"},
+                            {"target_id": "checkout.place_order", "message": "Review order totals and click Place Order to finalize.", "page": "/checkout"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            elif "product" in msg or page in ("products", "product"):
+                return {
+                    "reply": "Here is a guided tour of this product page!",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "product.title", "message": "View product title, style details, and current price."},
+                            {"target_id": "product.size.10", "message": "Select your shoe size from real-time available stock."},
+                            {"target_id": "product.add_to_cart_btn", "message": "Click Add to Cart to add this item to your bag."},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
+            else:
+                return {
+                    "reply": "Welcome to ShopHive! Let me give you a quick guided tour of our store.",
+                    "actions": [{
+                        "id": "act_1",
+                        "tool": "guided_tour",
+                        "parameters": {"steps": [
+                            {"target_id": "catalog.product.air-max-90", "message": "Footwear Catalog: Browse sneakers and click any pair to choose sizes.", "page": "/"},
+                            {"target_id": "nav.cart", "message": "Shopping Cart: Review your items, apply promo codes, and checkout.", "page": "/"},
+                            {"target_id": "nav.orders", "message": "Orders & Tracking: Track live package shipments and manage returns.", "page": "/"},
+                            {"target_id": "nav.settings", "message": "Settings: Switch to Dark Mode and customize notification preferences.", "page": "/"},
+                        ]},
+                    }],
+                    "status": "awaiting_actions",
+                }
 
         # --- Stock / sizes ---
         if "size" in msg or "stock" in msg or "available" in msg:
@@ -294,9 +584,11 @@ class MockAgentProvider:
         targets: list,
         tools: list,
         client_config: Optional[Any] = None,
+        history: Optional[list] = None,
+        original_message: Optional[str] = None,
     ) -> dict:
         """Generate a mock agent response based on pattern matching."""
-        result = self._match_patterns(message, context, targets, client_config)
+        result = self._match_patterns(message, context, targets, client_config, history, original_message)
 
         # Ensure all required fields
         return {
@@ -312,11 +604,17 @@ class MockAgentProvider:
         # For tool results, generate a summary reply
         all_ok = all(r.get("ok", False) for r in results)
         if all_ok:
-            outputs = [r.get("output", "") for r in results if r.get("output") and str(r.get("output")).lower() != "completed"]
-            if outputs:
-                reply = f"Here's what I found: {'; '.join(str(o) for o in outputs)}"
+            is_tour = any("tour" in str(r.get("output", "")).lower() for r in results) or any(
+                a.get("tool") == "guided_tour" for a in run_state.get("plan", {}).get("actions", [])
+            )
+            if is_tour:
+                reply = "Tour completed! Let me know if you would like to explore anything else or perform any actions."
             else:
-                reply = "Done! All actions completed successfully."
+                outputs = [r.get("output", "") for r in results if r.get("output") and str(r.get("output")).lower() != "completed"]
+                if outputs:
+                    reply = f"Here's what I found: {'; '.join(str(o) for o in outputs)}"
+                else:
+                    reply = "Done! All actions completed successfully."
         else:
             errors = [r.get("error", "Unknown error") for r in results if not r.get("ok")]
             reply = f"Some actions couldn't be completed: {'; '.join(errors)}"
@@ -341,39 +639,39 @@ class MockAgentProvider:
         page_lower = page.lower()
         if "product" in page_lower:
             return [
+                "Take a guided tour of this product",
                 "What sizes are available in stock?",
                 "Can you add this item to my cart in size 10?",
-                "What is your 30-day return policy?"
             ][:count]
         elif "cart" in page_lower:
             return [
+                "Take a guided tour of cart",
                 "Can you apply promo code SAVE20?",
-                "What is the shipping cost?",
-                "Take me to checkout"
+                "Take me to checkout",
             ][:count]
         elif "checkout" in page_lower:
             return [
+                "Take a guided tour of checkout",
                 "Fill in my shipping address",
-                "What payment methods do you accept?",
-                "Is shipping free for this order?"
+                "Is shipping free for this order?",
             ][:count]
         elif "orders" in page_lower:
             return [
-                "Where is my order SH-1024?",
                 "Show me how to track returns",
-                "How long does refund processing take?"
+                "Where is my order SH-1024?",
+                "How long does refund processing take?",
             ][:count]
         elif "settings" in page_lower:
             return [
+                "Take a guided tour of settings",
                 "Switch appearance to Dark Mode",
                 "How do I update notification preferences?",
-                "Where can I change my shipping address?"
             ][:count]
         else:
             return [
+                "Take a guided tour",
                 "Show me popular running shoes",
                 "Do you offer free shipping?",
-                "Switch to Dark Mode"
             ][:count]
 
 
