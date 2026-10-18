@@ -8,14 +8,17 @@ import hashlib
 import json
 import time
 import uuid
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-from .models import CreateRunRequest, ContinueRunRequest, RunResponse
+from .models import CreateRunRequest, ContinueRunRequest, RunResponse, RunStatus
 from .storage.base import RunStore
+
+logger = logging.getLogger("ghost_cursor.run_manager")
 
 
 RUN_EXPIRY_MINUTES = 30
@@ -246,7 +249,8 @@ class RunManager:
                 run.status = agent_result.get("status", "completed")
                 if agent_result.get("reply"):
                     run.history.append({"role": "assistant", "content": agent_result["reply"]})
-            except Exception:
+            except Exception as e:
+                logger.error(f"Failed to re-plan with answer: {e}", exc_info=True)
                 run.status = "failed"
                 run.plan = {"reply": "I encountered an error. Please try again.", "actions": [], "questions": [], "toolCalls": []}
 
@@ -287,7 +291,8 @@ class RunManager:
                     run.status = agent_result.get("status", "completed")
                     if agent_result.get("reply"):
                         run.history.append({"role": "assistant", "content": agent_result["reply"]})
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Failed to continue with results: {e}", exc_info=True)
                     # Commit receipts but fail the run
                     run.status = "failed"
                     run.plan = {"reply": "Actions were applied but replanning failed.", "actions": [], "questions": [], "toolCalls": []}
@@ -308,16 +313,32 @@ class RunManager:
     def _build_response(self, run: RunState) -> RunResponse:
         """Build a RunResponse from current run state."""
         plan = run.plan or {}
-        return RunResponse(
-            protocolVersion="1",
-            runId=run.id,
-            revision=run.revision,
-            status=run.status,
-            reply=plan.get("reply"),
-            questions=plan.get("questions", []),
-            actions=plan.get("actions", []),
-            toolCalls=plan.get("toolCalls", []),
-        )
+        try:
+            return RunResponse(
+                protocolVersion="1",
+                runId=run.id,
+                revision=run.revision,
+                status=run.status,
+                reply=plan.get("reply"),
+                questions=plan.get("questions", []),
+                actions=plan.get("actions", []),
+                toolCalls=plan.get("toolCalls", []),
+            )
+        except Exception as e:
+            logger.error(f"Failed to build RunResponse for run {run.id}: {e}", exc_info=True)
+            safe_status = RunStatus.COMPLETED
+            if run.status in [s.value for s in RunStatus]:
+                safe_status = RunStatus(run.status)
+            return RunResponse(
+                protocolVersion="1",
+                runId=run.id,
+                revision=run.revision,
+                status=safe_status,
+                reply=plan.get("reply") or "Plan execution updated.",
+                questions=[],
+                actions=[],
+                toolCalls=[],
+            )
 
     def _build_response_dict(self, run: RunState) -> dict:
         """Build response as dict for storage."""

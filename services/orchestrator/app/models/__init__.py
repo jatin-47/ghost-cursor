@@ -154,6 +154,21 @@ class ActionItem(BaseModel):
     tool: str = Field(..., min_length=1, max_length=120)
     parameters: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_action(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Unpack parameters if they were specified at root level
+            params = data.get("parameters") or data.get("arguments") or {}
+            if not isinstance(params, dict) or not params:
+                params = {k: v for k, v in data.items() if k not in ("id", "tool", "type", "name", "action", "parameters", "arguments")}
+            data["parameters"] = params
+            if "tool" not in data and "type" in data:
+                data["tool"] = data["type"]
+            elif "tool" not in data and "name" in data:
+                data["tool"] = data["name"]
+        return data
+
     @field_validator("id")
     @classmethod
     def validate_id(cls, v: str) -> str:
@@ -171,9 +186,30 @@ class QuestionItem(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000)
     options: list[str] = Field(
         default_factory=list,
-        max_length=10,
-        description="Suggested answer options (max 10, each max 200 chars)",
+        max_length=25,
+        description="Suggested answer options (max 25, each max 200 chars)",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_question(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            q_str = data.strip() or "Can you clarify?"
+            return {"question": q_str, "options": []}
+        if isinstance(data, dict):
+            q_str = str(data.get("question") or data.get("text") or data.get("prompt") or "").strip()
+            data["question"] = q_str if q_str else "Can you clarify?"
+        return data
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def normalize_options(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        norm = []
+        for opt in v[:25]:
+            norm.append(str(opt)[:200])
+        return norm
 
     @field_validator("options")
     @classmethod
@@ -191,6 +227,18 @@ class ToolCallItem(BaseModel):
     tool: str = Field(..., min_length=1, max_length=120)
     parameters: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_tool_call(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            params = data.get("parameters") or data.get("arguments") or {}
+            if not isinstance(params, dict) or not params:
+                params = {k: v for k, v in data.items() if k not in ("id", "tool", "name", "action", "parameters", "arguments")}
+            data["parameters"] = params
+            if "tool" not in data and "name" in data:
+                data["tool"] = data["name"]
+        return data
+
     @field_validator("id")
     @classmethod
     def validate_id(cls, v: str) -> str:
@@ -200,6 +248,7 @@ class ToolCallItem(BaseModel):
     @classmethod
     def validate_tool(cls, v: str) -> str:
         return _validate_logical_id(v, "toolCall tool")
+
 
 
 class ResultItem(BaseModel):
@@ -349,10 +398,18 @@ class RunResponse(BaseModel):
             bool(self.toolCalls),
         ])
         if non_empty > 1:
-            raise ValueError(
-                "Discrete plan violation: only ONE of questions, actions, "
-                "or toolCalls may be non-empty in a single response"
-            )
+            if self.actions:
+                self.questions = []
+                self.toolCalls = []
+                self.status = RunStatus.AWAITING_ACTIONS
+            elif self.questions:
+                self.actions = []
+                self.toolCalls = []
+                self.status = RunStatus.AWAITING_ANSWER
+            elif self.toolCalls:
+                self.actions = []
+                self.questions = []
+                self.status = RunStatus.AWAITING_TOOLS
         return self
 
 

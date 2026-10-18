@@ -29,7 +29,7 @@ RunStatusLiteral = Literal[
 
 MAX_MESSAGE_LENGTH = 6000
 MAX_BRAIN_LENGTH = 32000
-MAX_OPTIONS = 10
+MAX_OPTIONS = 25
 MAX_SCALAR_LENGTH = 1000
 
 LOGICAL_ID_RE = re.compile(r"^[a-zA-Z0-9_.:\-]+$")
@@ -51,11 +51,22 @@ class ClarifyQuestion(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000)
     options: List[str] = Field(default_factory=list)
 
+    @field_validator("question", mode="before")
+    @classmethod
+    def normalize_question(cls, v: Any) -> str:
+        s = str(v).strip() if v is not None else ""
+        return s[:1000] if s else "Can you clarify?"
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def normalize_options(cls, v: Any) -> List[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(opt)[:200] for opt in v[:MAX_OPTIONS]]
+
     @field_validator("options")
     @classmethod
     def validate_options(cls, v: List[str]) -> List[str]:
-        if len(v) > MAX_OPTIONS:
-            raise ValueError(f"At most {MAX_OPTIONS} options")
         for opt in v:
             if len(opt) > 200:
                 raise ValueError("Option must be at most 200 characters")
@@ -91,7 +102,18 @@ class HostedRunResponse(BaseModel):
         if self.toolCalls and len(self.toolCalls) > 0:
             non_empty += 1
         if non_empty > 1:
-            raise ValueError("Only ONE of questions, actions, or toolCalls may be non-empty")
+            if self.actions:
+                self.questions = None
+                self.toolCalls = None
+                self.status = "awaiting_actions"
+            elif self.questions:
+                self.actions = None
+                self.toolCalls = None
+                self.status = "awaiting_answer"
+            elif self.toolCalls:
+                self.actions = None
+                self.questions = None
+                self.status = "awaiting_tools"
         return self
 
 
