@@ -49,18 +49,148 @@ def ask_clarification(question: str, options: List[str]) -> dict:
 FRONTEND_TOOLS = [navigate, click, fill_input, select_option, toggle_switch, guided_tour, ask_clarification]
 
 
+from dataclasses import dataclass, field
+import copy
+
+@dataclass
+class GhostAgent:
+    """Represents a configured Ghost Cursor agent instance."""
+    name: str
+    model: str
+    instruction: str
+    tools: List[Any]
+    brain_content: str = ""
+    available_targets: List[str] = field(default_factory=list)
+    current_context: Dict[str, Any] = field(default_factory=dict)
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+
+
+FRONTEND_ACTION_TOOLS = [
+    {
+        "name": "navigate",
+        "description": "Navigate to another page within the application",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_page": {"type": "string", "description": "Page identifier or path to navigate to"},
+                "explanation": {"type": "string", "description": "Why this navigation is needed"},
+            },
+            "required": ["target_page", "explanation"],
+        },
+    },
+    {
+        "name": "click",
+        "description": "Click a registered button, link, or tab",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string", "description": "Logical target ID"},
+                "explanation": {"type": "string", "description": "Why this click is needed"},
+            },
+            "required": ["target_id", "explanation"],
+        },
+    },
+    {
+        "name": "fill_input",
+        "description": "Type or set a value in a registered input or textarea",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string", "description": "Logical target ID"},
+                "value": {"type": "string", "description": "Value to type or enter"},
+                "explanation": {"type": "string", "description": "Why this input is needed"},
+            },
+            "required": ["target_id", "value", "explanation"],
+        },
+    },
+    {
+        "name": "select_option",
+        "description": "Select an option from a dropdown or select element",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string", "description": "Logical target ID"},
+                "option": {"type": "string", "description": "Option value to select"},
+                "explanation": {"type": "string", "description": "Why this selection is needed"},
+            },
+            "required": ["target_id", "option", "explanation"],
+        },
+    },
+    {
+        "name": "toggle_switch",
+        "description": "Toggle a switch or checkbox to true or false",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string", "description": "Logical target ID"},
+                "state": {"type": "boolean", "description": "Desired state (true/false)"},
+                "explanation": {"type": "string", "description": "Why this toggle is needed"},
+            },
+            "required": ["target_id", "state", "explanation"],
+        },
+    },
+    {
+        "name": "guided_tour",
+        "description": "Run an interactive guided tour spotlighting elements with explanations",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "target_id": {"type": "string"},
+                            "message": {"type": "string"},
+                        },
+                        "required": ["target_id", "message"],
+                    },
+                },
+            },
+            "required": ["steps"],
+        },
+    },
+    {
+        "name": "ask_clarification",
+        "description": "Ask the user a clarifying question before proceeding",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "maxLength": 1000},
+                "options": {"type": "array", "items": {"type": "string", "maxLength": 200}, "maxItems": 10},
+            },
+            "required": ["question", "options"],
+        },
+    },
+]
+
+
+def _format_targets(targets: list) -> str:
+    if not targets:
+        return "No targets registered on current page."
+    lines = []
+    for target in targets:
+        if isinstance(target, str):
+            lines.append(f"  - {target}")
+        elif isinstance(target, dict):
+            name = target.get("name", target.get("id", "unknown"))
+            desc = target.get("description", "")
+            lines.append(f"  - {name}" + (f" ({desc})" if desc else ""))
+    return "\n".join(lines) if lines else "No targets registered."
+
+
 def create_ghost_agent(
     brain_content: str,
     available_targets: list,
     current_context: dict,
     customer_backend_tools: Optional[list] = None,
-) -> dict:
-    """Build the agent configuration dict.
-
-    In a real deployment with google-adk installed, this would return
-    an actual google.adk.agents.llm_agent.Agent. For the hackathon
-    baseline, we return a config dict used by the MockProvider.
-    """
+) -> GhostAgent:
+    """Build the Ghost Cursor agent representation."""
     instruction = f"""You are Ghost Cursor, an autonomous UI co-pilot.
 You assist users by invoking frontend action tools to operate the web interface,
 or querying backend knowledge tools for customer database/business context.
@@ -69,7 +199,7 @@ or querying backend knowledge tools for customer database/business context.
 {brain_content}
 
 ### REGISTERED AVAILABLE UI TARGETS:
-{available_targets}
+{_format_targets(available_targets)}
 
 ### LIVE CLIENT CONTEXT:
 Current Page: {current_context.get('page', 'unknown')}
@@ -82,17 +212,52 @@ Values on Screen: {current_context.get('values', {})}
 4. Query customer backend tools whenever domain data is needed before taking action.
 5. Only return ONE tool invocation type per response turn.
 """
-    tools = list(FRONTEND_TOOLS)
+    tools = copy.deepcopy(FRONTEND_ACTION_TOOLS)
     if customer_backend_tools:
-        tools.extend(customer_backend_tools)
+        for t in customer_backend_tools:
+            if hasattr(t, "model_dump"):
+                tools.append(t.model_dump())
+            elif hasattr(t, "dict"):
+                tools.append(t.dict())
+            else:
+                tools.append(t)
 
-    return {
-        "name": "ghost_cursor_orchestrator",
-        "model": "gemini-2.0-flash",
-        "instruction": instruction,
-        "tools": tools,
-        "context": current_context,
-    }
+    return GhostAgent(
+        name="ghost_cursor_orchestrator",
+        model="gemini-2.0-flash",
+        instruction=instruction,
+        tools=tools,
+        brain_content=brain_content or "",
+        available_targets=available_targets or [],
+        current_context=current_context or {},
+    )
+
+
+def create_adk_agent(
+    brain_content: str,
+    available_targets: list,
+    current_context: dict,
+    customer_backend_tools: Optional[list] = None,
+    model: Any = "gemini-2.0-flash",
+) -> Any:
+    """Instantiate Google ADK Agent with long-running tools."""
+    from google.adk.agents.llm_agent import LlmAgent
+    from .llm.adk import build_adk_tools
+
+    ghost_agent = create_ghost_agent(
+        brain_content=brain_content,
+        available_targets=available_targets,
+        current_context=current_context,
+        customer_backend_tools=customer_backend_tools,
+    )
+    adk_tools = build_adk_tools(ghost_agent.tools)
+
+    return LlmAgent(
+        name=ghost_agent.name,
+        model=model,
+        instruction=lambda _ctx: ghost_agent.instruction,
+        tools=adk_tools,
+    )
 
 
 class MockAgentProvider:
@@ -102,7 +267,15 @@ class MockAgentProvider:
     for local testing without real GCP/Gemini credentials.
     """
 
-    def _match_patterns(self, message: str, context: dict, targets: list, client_config: Optional[Any] = None) -> dict:
+    def _match_patterns(
+        self,
+        message: str,
+        context: dict,
+        targets: list,
+        client_config: Optional[Any] = None,
+        history: Optional[list] = None,
+        original_message: Optional[str] = None,
+    ) -> dict:
         """Pattern-match user messages to generate realistic tool call responses."""
         from .guardrails import is_out_of_scope, get_guardrail_rejection
 
@@ -121,7 +294,42 @@ class MockAgentProvider:
             return get_guardrail_rejection(refusal_msg)
 
         msg = message.lower().strip()
+        orig = (original_message or "").lower().strip()
         page = context.get("page", "")
+
+        # --- Clarification answer: Checkout shipping address ---
+        if ("checkout" in orig or "address" in orig) and ("123" in msg or "main" in msg or "saved" in msg or "address" in msg or "new" in msg):
+            actions = []
+            if page != "checkout":
+                actions.append({
+                    "id": "act_1",
+                    "tool": "navigate",
+                    "parameters": {"target_page": "checkout", "explanation": "Navigating to checkout page."},
+                })
+            act_offset = len(actions) + 1
+            actions.extend([
+                {"id": f"act_{act_offset}", "tool": "fill_input", "parameters": {"target_id": "checkout.address.street", "value": "123 Main St", "explanation": "Filling in street address."}},
+                {"id": f"act_{act_offset+1}", "tool": "fill_input", "parameters": {"target_id": "checkout.address.city", "value": "New York", "explanation": "Filling in city."}},
+                {"id": f"act_{act_offset+2}", "tool": "fill_input", "parameters": {"target_id": "checkout.address.state", "value": "NY", "explanation": "Filling in state."}},
+                {"id": f"act_{act_offset+3}", "tool": "fill_input", "parameters": {"target_id": "checkout.address.zip", "value": "10001", "explanation": "Filling in zip code."}},
+            ])
+            return {
+                "reply": "I'll fill in the shipping address for you.",
+                "actions": actions,
+                "status": "awaiting_actions",
+            }
+
+        # --- Clarification answer: Order tracking selection ---
+        if ("order" in orig or "track" in orig) and "sh-" in msg:
+            import re
+            order_match = re.search(r"(SH-\d+|order\s*#?\s*\d+)", msg, re.IGNORECASE)
+            if order_match:
+                return {
+                    "reply": f"Let me look up {order_match.group(1)} for you.",
+                    "toolCalls": [{"id": "tc_1", "tool": "lookup_order", "parameters": {"order_id": order_match.group(1)}}],
+                    "actions": [],
+                    "status": "awaiting_tools",
+                }
 
         # --- Dark mode / Light mode / theme ---
         if any(kw in msg for kw in ["dark mode", "dark theme", "switch theme", "appearance", "light mode", "light theme", "light"]):
@@ -376,9 +584,11 @@ class MockAgentProvider:
         targets: list,
         tools: list,
         client_config: Optional[Any] = None,
+        history: Optional[list] = None,
+        original_message: Optional[str] = None,
     ) -> dict:
         """Generate a mock agent response based on pattern matching."""
-        result = self._match_patterns(message, context, targets, client_config)
+        result = self._match_patterns(message, context, targets, client_config, history, original_message)
 
         # Ensure all required fields
         return {

@@ -22,12 +22,19 @@ class LLMProvider(ABC):
         targets: list,
         tools: list,
         client_config: Optional[Any] = None,
+        history: Optional[list] = None,
+        original_message: Optional[str] = None,
     ) -> dict:
         """Generate an agent response from user message + context."""
         ...
 
     @abstractmethod
-    async def continue_with_results(self, run_state: dict, results: list) -> dict:
+    async def continue_with_results(
+        self,
+        run_state: dict,
+        results: list,
+        client_config: Optional[Any] = None,
+    ) -> dict:
         """Continue generation after receiving tool/action results."""
         ...
 
@@ -63,10 +70,19 @@ class MockLLMProvider(LLMProvider):
         targets: list,
         tools: list,
         client_config: Optional[Any] = None,
+        history: Optional[list] = None,
+        original_message: Optional[str] = None,
     ) -> dict:
-        return await self._agent.generate(message, context, brain, targets, tools, client_config)
+        return await self._agent.generate(
+            message, context, brain, targets, tools, client_config, history, original_message
+        )
 
-    async def continue_with_results(self, run_state: dict, results: list) -> dict:
+    async def continue_with_results(
+        self,
+        run_state: dict,
+        results: list,
+        client_config: Optional[Any] = None,
+    ) -> dict:
         return await self._agent.continue_with_results(run_state, results)
 
     async def generate_suggestions(
@@ -134,7 +150,7 @@ class VertexAILLMProvider(LLMProvider):
                 t_params = t_params.dict()
 
             declarations.append({
-                "name": t_name,
+                "name": str(t_name).strip() if t_name else "",
                 "description": t_desc,
                 "parameters": t_params,
             })
@@ -148,10 +164,9 @@ class VertexAILLMProvider(LLMProvider):
             lines = []
             for t in declarations:
                 lines.append(
-                    f"- {t['name']}: {t['description']}\n"
-                    f"    name: {t['name']}\n"
-                    f"    description: {t['description']}\n"
-                    f"    parameters: {json.dumps(t['parameters'])}"
+                    f"- name: {t['name']}\n"
+                    f"  description: {t['description']}\n"
+                    f"  parameters: {json.dumps(t['parameters'])}"
                 )
             return "\n".join(lines)
         return "None registered."
@@ -228,7 +243,7 @@ Values on Screen: {context.get('values', {})}
    - In `reply`, provide a short, friendly conversational sentence explaining what you will do (e.g. "I'll switch the website to Light Mode for you." or "Follow along with this guided tour!"). NEVER put raw JSON or code blocks in `reply`!
    - Set `status` to "awaiting_actions".
 2. If asking clarification, populate `questions` (with `question` and `options`) and set `status` to "awaiting_answer".
-3. If calling registered backend tools (e.g. lookup_order):
+3. If calling registered backend tools:
    - You MUST populate `toolCalls` with: {{"id": "tc_1", "tool": "<registered_backend_tool_name>", "parameters": {{ ... }}}}.
    - In `reply`, provide a short, friendly conversational sentence explaining what you will look up (e.g. "Let me look up order SH-1024 for you."). NEVER put raw JSON or code blocks in `reply`!
    - Set `status` to "awaiting_tools".
@@ -259,6 +274,220 @@ Output strictly a valid JSON object matching this schema:
 }}
 """
 
+    @staticmethod
+    def _build_continue_prompt(original_message: str, history: list, results: list) -> str:
+        """Format continuation prompt containing original message, run history, and tool/action results."""
+        history_str = json.dumps(history, indent=2) if history else "[]"
+        results_str = json.dumps(results, indent=2) if results else "[]"
+
+        return f"""### ORIGINAL USER REQUEST:
+{original_message}
+
+### RUN CONVERSATION HISTORY:
+{history_str}
+
+### TOOL / ACTION EXECUTION RESULTS:
+{results_str}
+
+Please continue reasoning given the execution results above. Formulate the next response for the user matching the required JSON schema.
+If all actions or tools succeeded and the goal is reached, summarize the outcome in `reply` and set status to "completed".
+If further actions, backend tool calls, or clarification questions are needed, specify them and set the appropriate status."""
+
+    @staticmethod
+    def _parse_plan_response(raw_text: str, backend_tool_names: set[str]) -> dict:
+        """Parse raw JSON response from Gemini into standard Ghost Cursor plan dict."""
+        # Strip markdown fences if present
+        cleaned = raw_text
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+
+        parsed = None
+        try:
+            parsed = json.loads(cleaned)
+        except Exception as pe:
+            logger.warning(f"Direct JSON parse failed ({pe}), attempting regex extraction.")
+            match = re.search(r"(\{|\[).+(\}|\])", cleaned, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except Exception:
+                    parsed = None
+
+        # If parsed is a single tool call / action dict without actions/toolCalls wrapper:
+        if isinstance(parsed, dict) and ("tool" in parsed or "name" in parsed) and "toolCalls" not in parsed and "actions" not in parsed and "status" not in parsed:
+            parsed = [parsed]
+
+        # 1. If parsed is a list of actions/tool calls (e.g. [{"name": "navigate", ...}] or [{"tool": "navigate", ...}])
+        if isinstance(parsed, list):
+            actions = []
+            tool_calls = []
+            for idx, item in enumerate(parsed):
+                if not isinstance(item, dict):
+                    continue
+                tool = (item.get("tool") or item.get("name") or item.get("action") or "").strip()
+                if not tool:
+                    continue
+                raw_params = item.get("parameters") or item.get("arguments") or item
+                params = {}
+                if tool == "navigate":
+                    target = raw_params.get("target_page") or raw_params.get("path") or raw_params.get("page") or "settings"
+                    params["target_page"] = str(target).lstrip("/")
+                    params["explanation"] = raw_params.get("explanation") or f"Navigating to {params['target_page']}."
+                elif tool == "toggle_switch":
+                    params["target_id"] = raw_params.get("target_id") or "settings.theme_toggle"
+                    params["state"] = bool(raw_params.get("state", False))
+                    params["explanation"] = raw_params.get("explanation") or "Toggling switch."
+                else:
+                    params = {k: v for k, v in raw_params.items() if k not in ("tool", "name", "action", "id")}
+
+                if tool in backend_tool_names:
+                    tool_calls.append({
+                        "id": f"tc_{len(tool_calls) + 1}",
+                        "tool": tool,
+                        "parameters": params,
+                    })
+                elif tool in ("navigate", "click", "fill_input", "select_option", "toggle_switch", "guided_tour"):
+                    actions.append({
+                        "id": f"act_{len(actions) + 1}",
+                        "tool": tool,
+                        "parameters": params,
+                    })
+
+            if tool_calls:
+                return {
+                    "reply": "I'll look that up for you.",
+                    "questions": [],
+                    "actions": [],
+                    "toolCalls": tool_calls,
+                    "status": "awaiting_tools",
+                }
+
+            friendly_reply = "I'll perform the requested actions for you."
+            if any("theme" in str(a) or "settings" in str(a) for a in actions):
+                friendly_reply = "I'll update the appearance settings for you."
+
+            return {
+                "reply": friendly_reply if actions else raw_text,
+                "questions": [],
+                "actions": actions,
+                "toolCalls": [],
+                "status": "awaiting_actions" if actions else "completed",
+            }
+
+        # 2. If parsed is a dict (standard Ghost Cursor plan or variant)
+        if isinstance(parsed, dict):
+            reply = parsed.get("reply")
+            actions = parsed.get("actions", [])
+            questions = parsed.get("questions", [])
+            raw_tool_calls = parsed.get("toolCalls") or parsed.get("tool_calls", [])
+
+            # If reply itself was accidentally set to raw JSON code block, clean it up
+            if reply and (reply.strip().startswith("```") or reply.strip().startswith("{") or reply.strip().startswith("[")):
+                if actions:
+                    reply = "I'll perform the planned actions for you."
+                elif questions:
+                    reply = None
+                elif raw_tool_calls:
+                    reply = "I'll look that up for you."
+                else:
+                    reply = "Here is what I found."
+
+            # Normalize actions
+            normalized_actions = []
+            for idx, a in enumerate(actions):
+                if not isinstance(a, dict):
+                    continue
+                a_id = a.get("id") or f"act_{idx + 1}"
+                a_tool = a.get("tool") or a.get("name") or a.get("action") or "navigate"
+                a_params = a.get("parameters") or a.get("arguments") or {}
+                if a_tool == "navigate" and "path" in a_params and "target_page" not in a_params:
+                    a_params["target_page"] = str(a_params.pop("path")).lstrip("/")
+                elif a_tool == "navigate" and "target_page" in a_params:
+                    a_params["target_page"] = str(a_params["target_page"]).lstrip("/")
+                normalized_actions.append({
+                    "id": a_id,
+                    "tool": a_tool,
+                    "parameters": a_params,
+                })
+
+            # Normalize tool_calls: drop empty or undeclared tool names
+            normalized_tool_calls = []
+            for idx, tc in enumerate(raw_tool_calls):
+                if not isinstance(tc, dict):
+                    continue
+                tc_tool = (tc.get("tool") or tc.get("name") or "").strip()
+                if not tc_tool or tc_tool not in backend_tool_names:
+                    continue
+                tc_id = tc.get("id") or f"tc_{len(normalized_tool_calls) + 1}"
+                tc_params = tc.get("parameters") or tc.get("arguments") or {}
+                if not isinstance(tc_params, dict):
+                    tc_params = {}
+                normalized_tool_calls.append({
+                    "id": tc_id,
+                    "tool": tc_tool,
+                    "parameters": tc_params,
+                })
+
+            # Determine discrete plan status respecting model's indicated status if present
+            indicated_status = parsed.get("status")
+            if indicated_status == "awaiting_tools" and normalized_tool_calls:
+                status = "awaiting_tools"
+                normalized_actions = []
+                questions = []
+                if not reply:
+                    reply = "I'll look that up for you."
+            elif indicated_status == "awaiting_actions" and normalized_actions:
+                status = "awaiting_actions"
+                normalized_tool_calls = []
+                questions = []
+                if not reply:
+                    reply = "I'll execute the planned actions for you."
+            elif indicated_status == "awaiting_answer" and questions:
+                status = "awaiting_answer"
+                normalized_actions = []
+                normalized_tool_calls = []
+            elif normalized_tool_calls:
+                status = "awaiting_tools"
+                normalized_actions = []
+                questions = []
+                if not reply:
+                    reply = "I'll look that up for you."
+            elif normalized_actions:
+                status = "awaiting_actions"
+                questions = []
+                normalized_tool_calls = []
+                if not reply:
+                    reply = "I'll execute the planned actions for you."
+            elif questions:
+                status = "awaiting_answer"
+                normalized_actions = []
+                normalized_tool_calls = []
+            else:
+                status = "completed"
+                normalized_actions = []
+                questions = []
+                normalized_tool_calls = []
+                if not reply:
+                    reply = raw_text
+
+            return {
+                "reply": reply,
+                "questions": questions,
+                "actions": normalized_actions,
+                "toolCalls": normalized_tool_calls,
+                "status": status,
+            }
+
+        # 3. Plain text fallback (direct conversational answer, refusal, etc.)
+        return {
+            "reply": raw_text,
+            "questions": [],
+            "actions": [],
+            "toolCalls": [],
+            "status": "completed",
+        }
+
     async def generate(
         self,
         message: str,
@@ -267,6 +496,8 @@ Output strictly a valid JSON object matching this schema:
         targets: list,
         tools: list,
         client_config: Optional[Any] = None,
+        history: Optional[list] = None,
+        original_message: Optional[str] = None,
     ) -> dict:
         """Generate tool calls and reasoning with Gemini 2.0 with strict guardrails."""
         from ..guardrails import is_out_of_scope, get_guardrail_rejection, DEFAULT_OUT_OF_SCOPE_MESSAGE
@@ -312,6 +543,23 @@ Output strictly a valid JSON object matching this schema:
             tools=tools,
             context=context,
         )
+
+        # Build user contents prompt (including history / original_message if provided)
+        contents_prompt = message
+        if history or original_message:
+            history_str = json.dumps(history, indent=2) if history else "[]"
+            orig = original_message or message
+            contents_prompt = f"""### ORIGINAL USER REQUEST:
+{orig}
+
+### CONVERSATION HISTORY:
+{history_str}
+
+### CURRENT USER MESSAGE / CLARIFICATION ANSWER:
+{message}
+
+Please evaluate the user's latest response in the context of the conversation history and original request, and formulate the appropriate next response/actions adhering strictly to the JSON schema."""
+
         # Try importing and using google.genai or vertexai SDK
         try:
             from google import genai
@@ -328,7 +576,7 @@ Output strictly a valid JSON object matching this schema:
             # Generate content with structured JSON enforcement
             response = await client.aio.models.generate_content(
                 model=self.model_name,
-                contents=message,
+                contents=contents_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     temperature=0.2,
@@ -339,193 +587,7 @@ Output strictly a valid JSON object matching this schema:
             raw_text = (response.text or "").strip()
             logger.info(f"Vertex AI raw response: {raw_text[:200]}")
 
-            # Strip markdown fences if present
-            cleaned = raw_text
-            if cleaned.startswith("```"):
-                cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-                cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-
-            parsed = None
-            try:
-                parsed = json.loads(cleaned)
-            except Exception as pe:
-                logger.warning(f"Direct JSON parse failed ({pe}), attempting regex extraction.")
-                match = re.search(r"(\{|\[).+(\}|\])", cleaned, re.DOTALL)
-                if match:
-                    try:
-                        parsed = json.loads(match.group(0))
-                    except Exception:
-                        parsed = None
-
-            # If parsed is a single tool call / action dict without actions/toolCalls wrapper:
-            if isinstance(parsed, dict) and ("tool" in parsed or "name" in parsed) and "toolCalls" not in parsed and "actions" not in parsed and "status" not in parsed:
-                parsed = [parsed]
-
-            # 1. If parsed is a list of actions/tool calls (e.g. [{"name": "navigate", ...}] or [{"tool": "navigate", ...}])
-            if isinstance(parsed, list):
-                actions = []
-                tool_calls = []
-                for idx, item in enumerate(parsed):
-                    if not isinstance(item, dict):
-                        continue
-                    tool = item.get("tool") or item.get("name") or item.get("action") or "navigate"
-                    raw_params = item.get("parameters") or item.get("arguments") or item
-                    params = {}
-                    if tool == "navigate":
-                        target = raw_params.get("target_page") or raw_params.get("path") or raw_params.get("page") or "settings"
-                        params["target_page"] = str(target).lstrip("/")
-                        params["explanation"] = raw_params.get("explanation") or f"Navigating to {params['target_page']}."
-                    elif tool == "toggle_switch":
-                        params["target_id"] = raw_params.get("target_id") or "settings.theme_toggle"
-                        params["state"] = bool(raw_params.get("state", False))
-                        params["explanation"] = raw_params.get("explanation") or "Toggling switch."
-                    else:
-                        params = {k: v for k, v in raw_params.items() if k not in ("tool", "name", "action", "id")}
-
-                    if tool in backend_tool_names or tool in ("lookup_order", "check_warehouse_stock", "simulate_discount_roi"):
-                        tool_calls.append({
-                            "id": f"tc_{idx + 1}",
-                            "tool": tool,
-                            "parameters": params,
-                        })
-                    else:
-                        actions.append({
-                            "id": f"act_{idx + 1}",
-                            "tool": tool,
-                            "parameters": params,
-                        })
-
-                if tool_calls:
-                    return {
-                        "reply": "I'll look that up for you.",
-                        "questions": [],
-                        "actions": [],
-                        "toolCalls": tool_calls,
-                        "status": "awaiting_tools",
-                    }
-
-                friendly_reply = "I'll perform the requested actions for you."
-                if any("theme" in str(a) or "settings" in str(a) for a in actions):
-                    friendly_reply = "I'll update the appearance settings for you."
-
-                return {
-                    "reply": friendly_reply,
-                    "questions": [],
-                    "actions": actions,
-                    "toolCalls": [],
-                    "status": "awaiting_actions" if actions else "completed",
-                }
-
-            # 2. If parsed is a dict (standard Ghost Cursor plan or variant)
-            if isinstance(parsed, dict):
-                reply = parsed.get("reply")
-                actions = parsed.get("actions", [])
-                questions = parsed.get("questions", [])
-                raw_tool_calls = parsed.get("toolCalls") or parsed.get("tool_calls", [])
-
-                # If reply itself was accidentally set to raw JSON code block, clean it up
-                if reply and (reply.strip().startswith("```") or reply.strip().startswith("{") or reply.strip().startswith("[")):
-                    if actions:
-                        reply = "I'll perform the planned actions for you."
-                    elif questions:
-                        reply = None
-                    elif raw_tool_calls:
-                        reply = "I'll look that up for you."
-                    else:
-                        reply = "Here is what I found."
-
-                # Normalize actions
-                normalized_actions = []
-                for idx, a in enumerate(actions):
-                    if not isinstance(a, dict):
-                        continue
-                    a_id = a.get("id") or f"act_{idx + 1}"
-                    a_tool = a.get("tool") or a.get("name") or a.get("action") or "navigate"
-                    a_params = a.get("parameters") or a.get("arguments") or {}
-                    if a_tool == "navigate" and "path" in a_params and "target_page" not in a_params:
-                        a_params["target_page"] = str(a_params.pop("path")).lstrip("/")
-                    elif a_tool == "navigate" and "target_page" in a_params:
-                        a_params["target_page"] = str(a_params["target_page"]).lstrip("/")
-                    normalized_actions.append({
-                        "id": a_id,
-                        "tool": a_tool,
-                        "parameters": a_params,
-                    })
-
-                # Normalize tool_calls
-                normalized_tool_calls = []
-                for idx, tc in enumerate(raw_tool_calls):
-                    if not isinstance(tc, dict):
-                        continue
-                    tc_id = tc.get("id") or f"tc_{idx + 1}"
-                    tc_tool = tc.get("tool") or tc.get("name") or ""
-                    tc_params = tc.get("parameters") or tc.get("arguments") or {}
-                    if not isinstance(tc_params, dict):
-                        tc_params = {}
-                    normalized_tool_calls.append({
-                        "id": tc_id,
-                        "tool": tc_tool,
-                        "parameters": tc_params,
-                    })
-
-                # Determine discrete plan status respecting model's indicated status if present
-                indicated_status = parsed.get("status")
-                if indicated_status == "awaiting_tools" and normalized_tool_calls:
-                    status = "awaiting_tools"
-                    normalized_actions = []
-                    questions = []
-                    if not reply:
-                        reply = "I'll look that up for you."
-                elif indicated_status == "awaiting_actions" and normalized_actions:
-                    status = "awaiting_actions"
-                    normalized_tool_calls = []
-                    questions = []
-                    if not reply:
-                        reply = "I'll execute the planned actions for you."
-                elif indicated_status == "awaiting_answer" and questions:
-                    status = "awaiting_answer"
-                    normalized_actions = []
-                    normalized_tool_calls = []
-                elif normalized_tool_calls:
-                    status = "awaiting_tools"
-                    normalized_actions = []
-                    questions = []
-                    if not reply:
-                        reply = "I'll look that up for you."
-                elif normalized_actions:
-                    status = "awaiting_actions"
-                    questions = []
-                    normalized_tool_calls = []
-                    if not reply:
-                        reply = "I'll execute the planned actions for you."
-                elif questions:
-                    status = "awaiting_answer"
-                    normalized_actions = []
-                    normalized_tool_calls = []
-                else:
-                    status = "completed"
-                    normalized_actions = []
-                    questions = []
-                    normalized_tool_calls = []
-                    if not reply:
-                        reply = raw_text
-
-                return {
-                    "reply": reply,
-                    "questions": questions,
-                    "actions": normalized_actions,
-                    "toolCalls": normalized_tool_calls,
-                    "status": status,
-                }
-
-            # 3. Plain text fallback (direct conversational answer, refusal, etc.)
-            return {
-                "reply": raw_text,
-                "questions": [],
-                "actions": [],
-                "toolCalls": [],
-                "status": "completed",
-            }
+            return self._parse_plan_response(raw_text, backend_tool_names)
         except Exception as e:
             logger.warning(
                 f"Vertex AI call failed ({e}). Falling back to deterministic pattern engine for resilient execution."
@@ -533,13 +595,101 @@ Output strictly a valid JSON object matching this schema:
             # Resilient fallback so application never crashes
             from ..agent import MockAgentProvider
             fallback = MockAgentProvider()
-            return await fallback.generate(message, context, brain, targets, tools, client_config)
+            return await fallback.generate(
+                message, context, brain, targets, tools, client_config, history, original_message
+            )
 
-    async def continue_with_results(self, run_state: dict, results: list) -> dict:
-        """Continue agent loop with tool results or action receipts."""
-        from ..agent import MockAgentProvider
-        fallback = MockAgentProvider()
-        return await fallback.continue_with_results(run_state, results)
+    async def continue_with_results(
+        self,
+        run_state: dict,
+        results: list,
+        client_config: Optional[Any] = None,
+    ) -> dict:
+        """Continue agent loop with tool results or action receipts using Gemini 2.0."""
+        # 1. Resolve client configuration if not passed
+        if not client_config:
+            from ..tenant_config import get_tenant_config, extract_brain_config
+            brain_cfg = extract_brain_config(run_state.get("brain", ""))
+            client_config = get_tenant_config(run_state.get("tenant", "default"), brain_cfg)
+
+        app_name = "this application"
+        app_type = "web application"
+        refusal_msg = None
+
+        if client_config:
+            if hasattr(client_config, "app_name"):
+                app_name = client_config.app_name or "this application"
+                app_type = client_config.app_type or "web application"
+                refusal_msg = client_config.get_refusal_message()
+            elif isinstance(client_config, dict):
+                app_name = client_config.get("appName") or client_config.get("app_name") or "this application"
+                app_type = client_config.get("appType") or client_config.get("app_type") or "web application"
+                refusal_msg = client_config.get("outOfScopeMessage") or client_config.get("out_of_scope_message")
+
+        if not refusal_msg:
+            if app_name != "this application":
+                refusal_msg = (
+                    f"This request is out of scope. I can only assist with navigating and using {app_name}, "
+                    "performing on-screen actions, and answering questions related to its functionality."
+                )
+            else:
+                refusal_msg = DEFAULT_OUT_OF_SCOPE_MESSAGE
+
+        brain = run_state.get("brain", "")
+        context = run_state.get("context", {})
+        targets = context.get("availableTargets", []) or run_state.get("targets", [])
+        tools = run_state.get("tools", [])
+        original_message = run_state.get("original_message", "")
+        history = run_state.get("history", [])
+
+        system_instruction = self._build_system_instruction(
+            app_name=app_name,
+            app_type=app_type,
+            refusal_msg=refusal_msg,
+            brain=brain,
+            targets=targets,
+            tools=tools,
+            context=context,
+        )
+
+        prompt = self._build_continue_prompt(original_message, history, results)
+
+        try:
+            from google import genai
+            from google.genai import types
+
+            use_vertex = bool(self.project_id) or not bool(self.api_key)
+            client = genai.Client(
+                vertexai=use_vertex,
+                project=self.project_id,
+                location=self.location,
+                api_key=self.api_key if not use_vertex else None,
+            )
+
+            response = await client.aio.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                ),
+            )
+
+            raw_text = (response.text or "").strip()
+            logger.info(f"Vertex AI continue_with_results raw response: {raw_text[:200]}")
+
+            backend_tool_declarations = self._normalize_tool_declarations(tools)
+            backend_tool_names = {t["name"] for t in backend_tool_declarations if t.get("name")}
+
+            return self._parse_plan_response(raw_text, backend_tool_names)
+        except Exception as e:
+            logger.warning(
+                f"Vertex AI continue_with_results failed ({e}). Falling back to deterministic pattern engine."
+            )
+            from ..agent import MockAgentProvider
+            fallback = MockAgentProvider()
+            return await fallback.continue_with_results(run_state, results)
 
     async def generate_suggestions(
         self,
@@ -615,12 +765,28 @@ Output strictly a JSON list of {count} suggested questions."""
 def get_llm_provider() -> LLMProvider:
     """Factory creating the configured LLM provider based on environment variables.
 
-    Set LLM_PROVIDER=vertex to enable live Google Cloud Vertex AI calls.
+    Set GHOST_PROVIDER=adk to enable Google ADK agent provider.
+    Set LLM_PROVIDER=vertex or GHOST_PROVIDER=vertex to enable live Google Cloud Vertex AI calls.
     Defaults to MockLLMProvider for zero-config offline runs.
     """
-    provider_type = os.getenv("LLM_PROVIDER", "mock").lower()
+    provider_type = (os.getenv("GHOST_PROVIDER") or os.getenv("LLM_PROVIDER") or "mock").lower()
     logger.info(f"LLM Provider selected: {provider_type}")
+    if provider_type == "adk":
+        from .adk import ADKProvider
+        return ADKProvider()
     if provider_type in ("vertex", "vertexai", "gemini", "gcp"):
         return VertexAILLMProvider()
     
     return MockLLMProvider()
+
+
+from .adk import ADKProvider, ADKLLMProvider
+
+__all__ = [
+    "LLMProvider",
+    "MockLLMProvider",
+    "VertexAILLMProvider",
+    "ADKProvider",
+    "ADKLLMProvider",
+    "get_llm_provider",
+]
